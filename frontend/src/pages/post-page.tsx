@@ -357,6 +357,20 @@ export function PostPage() {
 		}
 	}
 
+	async function toggleCommentPin(comment: Comment) {
+		if (!user) return;
+		try {
+			await apiFetch(`/comments/${comment.id}/pin`, {
+				method: 'POST',
+				headers: getSecurityHeaders('POST'),
+				body: JSON.stringify({ pinned: !comment.is_pinned })
+			});
+			await refreshComments(commentSortOption, false);
+		} catch (e: any) {
+			alert(String(e?.message || e));
+		}
+	}
+
 	async function deletePost() {
 		if (!post) return;
 		if (!confirm('确定要删除这个帖子吗？此操作无法撤销。')) return;
@@ -552,6 +566,76 @@ export function PostPage() {
 		} finally {
 			setEditLoading(false);
 		}
+	}
+
+	function renderCommentForm(targetComment?: Comment | null) {
+		const isReplying = !!targetComment;
+		return (
+			<form className="space-y-3" onSubmit={submitComment}>
+				{isReplying ? (
+					<div className="flex items-center justify-between rounded-md border bg-muted/30 p-2 text-sm">
+						<span>
+							回复 <span className="font-medium">{targetComment.username}</span>
+						</span>
+						<Button variant="ghost" size="sm" onClick={() => setReplyTo(null)} type="button">
+							取消
+						</Button>
+					</div>
+				) : null}
+				{commentError ? <div className="rounded-md border border-destructive/50 bg-destructive/5 p-3 text-sm text-destructive">{commentError}</div> : null}
+				<div className="space-y-2">
+					<div className="text-sm font-medium">{isReplying ? '回复 (支持 Markdown)' : '评论 (支持 Markdown)'}</div>
+					<input
+						ref={commentImageInputRef}
+						type="file"
+						accept="image/*"
+						className="hidden"
+						disabled={uploadingCommentImage}
+						onChange={(event) => {
+							const file = event.target.files?.[0];
+							if (file) void uploadCommentImage(file);
+							event.target.value = '';
+						}}
+					/>
+					<div className="overflow-hidden rounded-md border" data-color-mode="light">
+						<MDEditor
+							value={newComment}
+							onChange={(value) => setNewComment(value || '')}
+							commands={commentEditorCommands}
+							preview="live"
+							visibleDragbar={false}
+							height={220}
+							textareaProps={{
+								placeholder: uploadingCommentImage ? '图片上传中...' : isReplying ? '写下你的回复...' : '写下你的评论...',
+								ref: (node) => {
+									commentTextareaRef.current = node;
+								},
+								onSelect: (event) => handleCommentSelection(event.currentTarget),
+								onClick: (event) => handleCommentSelection(event.currentTarget),
+								onKeyUp: (event) => handleCommentSelection(event.currentTarget),
+								onPaste: (event) => {
+									const imageItem = Array.from(event.clipboardData?.items ?? []).find((item) => item.kind === 'file' && item.type.startsWith('image/'));
+									const imageFile = imageItem?.getAsFile();
+									if (!imageFile) return;
+									event.preventDefault();
+									handleCommentSelection(event.currentTarget);
+									void uploadCommentImage(imageFile, { start: event.currentTarget.selectionStart ?? 0, end: event.currentTarget.selectionEnd ?? 0 });
+								}
+							}}
+						/>
+					</div>
+				</div>
+				<TurnstileWidget enabled={enabled} siteKey={siteKey} onToken={setTurnstileToken} resetKey={turnstileResetKey} />
+				<div className="flex items-center gap-2">
+					<Button type="submit" disabled={commentLoading || commentsLoading}>{commentLoading ? '发布中...' : isReplying ? '发布回复' : '发布评论'}</Button>
+					{!user ? (
+						<Button type="button" variant="outline" onClick={() => (window.location.href = '/login')}>
+							登录后评论
+						</Button>
+					) : null}
+				</div>
+			</form>
+		);
 	}
 
 	return (
@@ -754,71 +838,7 @@ export function PostPage() {
 							</CardHeader>
 							<CardContent className="space-y-4">
 								{commentsLoading ? <div className="text-sm text-muted-foreground">评论加载中...</div> : null}
-								{replyTo ? (
-									<div className="flex items-center justify-between rounded-md border bg-muted/30 p-2 text-sm">
-										<span>
-											回复 <span className="font-medium">{replyTo.username}</span>
-										</span>
-										<Button variant="ghost" size="sm" onClick={() => setReplyTo(null)}>
-											取消
-										</Button>
-									</div>
-								) : null}
-
-								<form className="space-y-3" onSubmit={submitComment}>
-									{commentError ? <div className="rounded-md border border-destructive/50 bg-destructive/5 p-3 text-sm text-destructive">{commentError}</div> : null}
-									<div className="space-y-2">
-										<div className="text-sm font-medium">评论 (支持 Markdown)</div>
-										<input
-											ref={commentImageInputRef}
-											type="file"
-											accept="image/*"
-											className="hidden"
-											disabled={uploadingCommentImage}
-											onChange={(event) => {
-												const file = event.target.files?.[0];
-												if (file) void uploadCommentImage(file);
-												event.target.value = '';
-											}}
-										/>
-										<div className="overflow-hidden rounded-md border" data-color-mode="light">
-											<MDEditor
-												value={newComment}
-												onChange={(value) => setNewComment(value || '')}
-												commands={commentEditorCommands}
-												preview="live"
-												visibleDragbar={false}
-												height={220}
-												textareaProps={{
-													placeholder: uploadingCommentImage ? '图片上传中...' : '写下你的评论...',
-													ref: (node) => {
-														commentTextareaRef.current = node;
-													},
-													onSelect: (event) => handleCommentSelection(event.currentTarget),
-													onClick: (event) => handleCommentSelection(event.currentTarget),
-													onKeyUp: (event) => handleCommentSelection(event.currentTarget),
-													onPaste: (event) => {
-														const imageItem = Array.from(event.clipboardData?.items ?? []).find((item) => item.kind === 'file' && item.type.startsWith('image/'));
-														const imageFile = imageItem?.getAsFile();
-														if (!imageFile) return;
-														event.preventDefault();
-														handleCommentSelection(event.currentTarget);
-														void uploadCommentImage(imageFile, { start: event.currentTarget.selectionStart ?? 0, end: event.currentTarget.selectionEnd ?? 0 });
-													}
-												}}
-											/>
-										</div>
-									</div>
-									<TurnstileWidget enabled={enabled} siteKey={siteKey} onToken={setTurnstileToken} resetKey={turnstileResetKey} />
-									<div className="flex items-center gap-2">
-										<Button type="submit" disabled={commentLoading || commentsLoading}>{commentLoading ? '发布中...' : '发布评论'}</Button>
-										{!user ? (
-											<Button type="button" variant="outline" onClick={() => (window.location.href = '/login')}>
-												登录后评论
-											</Button>
-										) : null}
-									</div>
-								</form>
+								{!replyTo ? renderCommentForm() : null}
 
 								{comments.length === 0 ? (
 									<div className="text-sm text-muted-foreground">暂无评论</div>
@@ -828,10 +848,11 @@ export function PostPage() {
 											<div key={c.id} className="rounded-md border p-3">
 												<div className="flex items-center justify-between gap-2">
 													<div className="text-sm">
-														<span className="inline-flex items-center gap-2">
+														<span className="inline-flex flex-wrap items-center gap-2">
 															{c.avatar_url ? <img src={c.avatar_url} alt="" className="h-6 w-6 rounded-full object-cover" loading="lazy" referrerPolicy="no-referrer" /> : <span className="inline-flex h-6 w-6 items-center justify-center rounded-full bg-muted text-[10px] text-muted-foreground"><User className="h-4 w-4" /></span>}
 															<span className="font-medium text-foreground">{c.username}</span>
 															{c.role === 'admin' ? <span className="inline-flex items-center gap-1 rounded border border-indigo-500/30 bg-indigo-500/10 px-1.5 py-0.5 text-[10px] font-medium text-indigo-700 dark:text-indigo-300"><Shield className="h-3 w-3" /><span className="sr-only">管理员</span></span> : null}
+															{c.is_pinned ? <span className="inline-flex items-center gap-1 rounded border border-amber-500/30 bg-amber-500/10 px-1.5 py-0.5 text-[10px] font-medium text-amber-700 dark:text-amber-300"><Pin className="h-3 w-3" />置顶</span> : null}
 															<span className="text-muted-foreground">{formatDate(c.created_at)}</span>
 														</span>
 													</div>
@@ -846,14 +867,21 @@ export function PostPage() {
 															<span className="sr-only">回复</span>
 														</Button>
 														{user && (user.role === 'admin' || user.id === c.author_id) ? (
-															<Button variant="ghost" size="sm" onClick={() => deleteComment(c.id)}>
-																<Trash2 className="h-4 w-4" />
-																<span className="sr-only">删除</span>
-															</Button>
+															<>
+																<Button variant="ghost" size="sm" onClick={() => toggleCommentPin(c)}>
+																	<Pin className="h-4 w-4" />
+																	<span>{c.is_pinned ? '取消置顶' : '置顶'}</span>
+																</Button>
+																<Button variant="ghost" size="sm" onClick={() => deleteComment(c.id)}>
+																	<Trash2 className="h-4 w-4" />
+																	<span className="sr-only">删除</span>
+																</Button>
+															</>
 														) : null}
 													</div>
 												</div>
 												<div className="prose prose-sm mt-2 max-w-none break-words [&_ul]:list-disc [&_ul]:pl-6 [&_ol]:list-decimal [&_ol]:pl-6 [&_li]:my-1" dangerouslySetInnerHTML={{ __html: renderMarkdownToHtml(c.content || '') }} />
+												{replyTo?.id === c.id ? <div className="mt-3">{renderCommentForm(c)}</div> : null}
 												{c.replies && c.replies.length ? (
 													<div className="mt-3 space-y-2 border-l pl-3">
 														{c.replies.map((r) => (

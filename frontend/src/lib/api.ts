@@ -48,6 +48,7 @@ export type Comment = {
 	avatar_url?: string | null;
 	role?: 'admin' | 'user';
 	content: string;
+	is_pinned?: number;
 	created_at: string;
 	like_count?: number;
 	liked?: boolean;

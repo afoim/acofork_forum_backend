@@ -1182,8 +1182,29 @@ export default {
 				const body = await request.json() as any;
 				const { pinned } = body;
 				await env.forum_db.prepare('UPDATE posts SET is_pinned = ? WHERE id = ?').bind(pinned ? 1 : 0, id).run();
-				
+
 				await security.logAudit(userPayload.id, 'ADMIN_PIN_POST', 'post', id, { pinned }, request);
+				return jsonResponse({ success: true });
+			} catch (e) {
+				return handleError(e);
+			}
+		}
+
+		// POST /api/comments/:id/pin
+		if (url.pathname.match(/^\/api\/comments\/\d+\/pin$/) && method === 'POST') {
+			const id = url.pathname.split('/')[3];
+			try {
+				const userPayload = await authenticate(request);
+				const comment = await env.forum_db.prepare('SELECT id, parent_id, author_id FROM comments WHERE id = ?').bind(id).first();
+				if (!comment) return jsonResponse({ error: 'Comment not found' }, 404);
+				if (comment.parent_id !== null) return jsonResponse({ error: 'Only root comments can be pinned' }, 400);
+				if (userPayload.role !== 'admin' && comment.author_id !== userPayload.id) return jsonResponse({ error: 'Unauthorized' }, 403);
+
+				const body = await request.json() as any;
+				const { pinned } = body;
+				await env.forum_db.prepare('UPDATE comments SET is_pinned = ? WHERE id = ?').bind(pinned ? 1 : 0, id).run();
+
+				await security.logAudit(userPayload.id, pinned ? 'PIN_COMMENT' : 'UNPIN_COMMENT', 'comment', id, { pinned }, request);
 				return jsonResponse({ success: true });
 			} catch (e) {
 				return handleError(e);
@@ -1661,12 +1682,16 @@ export default {
                      FROM comments
                      JOIN users ON comments.author_id = users.id
                      WHERE post_id = ?
-                     ORDER BY ${sortExpr}`
+                     ORDER BY
+					 	CASE WHEN comments.parent_id IS NULL THEN 0 ELSE 1 END ASC,
+					 	CASE WHEN comments.parent_id IS NULL THEN COALESCE(comments.is_pinned, 0) ELSE 0 END DESC,
+					 	${sortExpr}`
 				).bind(currentUserId, postId).all();
 				return jsonResponse(results.map((comment: any) => ({
 					...comment,
 					like_count: Number(comment.like_count || 0),
-					liked: !!comment.liked
+					liked: !!comment.liked,
+					is_pinned: Number(comment.is_pinned || 0)
 				})));
 			} catch (e) {
 				return handleError(e);

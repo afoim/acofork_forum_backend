@@ -52,6 +52,7 @@ CREATE TABLE comments (
   parent_id INTEGER,
   author_id INTEGER NOT NULL,
   content TEXT NOT NULL,
+  is_pinned INTEGER NOT NULL DEFAULT 0,
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
   FOREIGN KEY (post_id) REFERENCES posts(id),
   FOREIGN KEY (parent_id) REFERENCES comments(id),
