@@ -545,6 +545,7 @@ export default {
 
 				// 2. Delete likes/comments ON user's posts (Cascade manually)
 				await env.forum_db.prepare('DELETE FROM likes WHERE post_id IN (SELECT id FROM posts WHERE author_id = ?)').bind(user_id).run();
+				await env.forum_db.prepare('DELETE FROM comment_likes WHERE comment_id IN (SELECT id FROM comments WHERE post_id IN (SELECT id FROM posts WHERE author_id = ?))').bind(user_id).run();
 				await env.forum_db.prepare('DELETE FROM comments WHERE post_id IN (SELECT id FROM posts WHERE author_id = ?)').bind(user_id).run();
 
 				// 3. Detach child comments that reply to user's comments
@@ -552,6 +553,8 @@ export default {
 
 				// 4. Delete user's activity
 				await env.forum_db.prepare('DELETE FROM likes WHERE user_id = ?').bind(user_id).run();
+				await env.forum_db.prepare('DELETE FROM comment_likes WHERE user_id = ?').bind(user_id).run();
+				await env.forum_db.prepare('DELETE FROM comment_likes WHERE comment_id IN (SELECT id FROM comments WHERE author_id = ?)').bind(user_id).run();
 				await env.forum_db.prepare('DELETE FROM comments WHERE author_id = ?').bind(user_id).run();
 
 				// 5. Delete sessions, posts and user
@@ -1082,6 +1085,7 @@ export default {
 
 				// 1. Delete likes and comments ON the user's posts (to avoid orphans)
 				await env.forum_db.prepare('DELETE FROM likes WHERE post_id IN (SELECT id FROM posts WHERE author_id = ?)').bind(id).run();
+				await env.forum_db.prepare('DELETE FROM comment_likes WHERE comment_id IN (SELECT id FROM comments WHERE post_id IN (SELECT id FROM posts WHERE author_id = ?))').bind(id).run();
 				await env.forum_db.prepare('DELETE FROM comments WHERE post_id IN (SELECT id FROM posts WHERE author_id = ?)').bind(id).run();
 
 				// 2. Detach child comments that reply to the user's comments
@@ -1089,6 +1093,8 @@ export default {
 
 				// 3. Delete the user's own activity (likes and comments they made)
 				await env.forum_db.prepare('DELETE FROM likes WHERE user_id = ?').bind(id).run();
+				await env.forum_db.prepare('DELETE FROM comment_likes WHERE user_id = ?').bind(id).run();
+				await env.forum_db.prepare('DELETE FROM comment_likes WHERE comment_id IN (SELECT id FROM comments WHERE author_id = ?)').bind(id).run();
 				await env.forum_db.prepare('DELETE FROM comments WHERE author_id = ?').bind(id).run();
 
 				// 4. Delete sessions and the user's posts
@@ -1137,6 +1143,7 @@ export default {
 				}
 
 				await env.forum_db.prepare('DELETE FROM likes WHERE post_id = ?').bind(id).run();
+				await env.forum_db.prepare('DELETE FROM comment_likes WHERE comment_id IN (SELECT id FROM comments WHERE post_id = ?)').bind(id).run();
 				await env.forum_db.prepare('DELETE FROM comments WHERE post_id = ?').bind(id).run();
 				await env.forum_db.prepare('DELETE FROM posts WHERE id = ?').bind(id).run();
 				
@@ -1612,6 +1619,7 @@ export default {
 				}
 
 				await env.forum_db.prepare('DELETE FROM likes WHERE post_id = ?').bind(id).run();
+				await env.forum_db.prepare('DELETE FROM comment_likes WHERE comment_id IN (SELECT id FROM comments WHERE post_id = ?)').bind(id).run();
 				await env.forum_db.prepare('DELETE FROM comments WHERE post_id = ?').bind(id).run();
 				await env.forum_db.prepare('DELETE FROM posts WHERE id = ?').bind(id).run();
 				
@@ -1626,14 +1634,29 @@ export default {
 		if (url.pathname.match(/^\/api\/posts\/\d+\/comments$/) && method === 'GET') {
 			const postId = url.pathname.split('/')[3];
 			try {
+				let currentUserId: number | null = null;
+				try {
+					const userPayload = await authenticate(request);
+					currentUserId = userPayload.id;
+				} catch {}
+
 				const { results } = await env.forum_db.prepare(
-					`SELECT comments.*, users.username, users.avatar_url, users.role 
-                     FROM comments 
-                     JOIN users ON comments.author_id = users.id 
-                     WHERE post_id = ? 
+					`SELECT comments.*, users.username, users.avatar_url, users.role,
+						(SELECT COUNT(*) FROM comment_likes WHERE comment_likes.comment_id = comments.id) as like_count,
+						EXISTS(
+							SELECT 1 FROM comment_likes
+							WHERE comment_likes.comment_id = comments.id AND comment_likes.user_id = ?
+						) as liked
+                     FROM comments
+                     JOIN users ON comments.author_id = users.id
+                     WHERE post_id = ?
                      ORDER BY created_at ASC`
-				).bind(postId).all();
-				return jsonResponse(results);
+				).bind(currentUserId, postId).all();
+				return jsonResponse(results.map((comment: any) => ({
+					...comment,
+					like_count: Number(comment.like_count || 0),
+					liked: !!comment.liked
+				})));
 			} catch (e) {
 				return handleError(e);
 			}
@@ -1786,12 +1809,42 @@ export default {
 					return jsonResponse({ error: 'Unauthorized' }, 403);
 				}
 
+				// Delete comment likes for the comment and its direct children before deleting comments
+				await env.forum_db.prepare('DELETE FROM comment_likes WHERE comment_id IN (SELECT id FROM comments WHERE parent_id = ?)').bind(id).run();
+				await env.forum_db.prepare('DELETE FROM comment_likes WHERE comment_id = ?').bind(id).run();
+
 				// Delete the comment AND its children (orphans prevention)
 				await env.forum_db.prepare('DELETE FROM comments WHERE parent_id = ?').bind(id).run();
 				await env.forum_db.prepare('DELETE FROM comments WHERE id = ?').bind(id).run();
 				
 				await security.logAudit(userPayload.id, 'DELETE_COMMENT', 'comment', id, {}, request);
 				return jsonResponse({ success: true });
+			} catch (e) {
+				return handleError(e);
+			}
+		}
+
+		// POST /api/comments/:id/like
+		if (url.pathname.match(/^\/api\/comments\/\d+\/like$/) && method === 'POST') {
+			const commentId = url.pathname.split('/')[3];
+			try {
+				const userPayload = await authenticate(request);
+				const userId = userPayload.id;
+
+				const comment = await env.forum_db.prepare('SELECT id FROM comments WHERE id = ?').bind(commentId).first();
+				if (!comment) return jsonResponse({ error: 'Comment not found' }, 404);
+
+				const existing = await env.forum_db.prepare(
+					'SELECT id FROM comment_likes WHERE comment_id = ? AND user_id = ?'
+				).bind(commentId, userId).first();
+
+				if (existing) {
+					await env.forum_db.prepare('DELETE FROM comment_likes WHERE id = ?').bind(existing.id).run();
+					return jsonResponse({ liked: false });
+				} else {
+					await env.forum_db.prepare('INSERT INTO comment_likes (comment_id, user_id) VALUES (?, ?)').bind(commentId, userId).run();
+					return jsonResponse({ liked: true });
+				}
 			} catch (e) {
 				return handleError(e);
 			}

@@ -163,6 +163,33 @@ export function PostPage() {
 		}
 	}
 
+	async function toggleCommentLike(commentId: number) {
+		if (!user) {
+			window.location.href = '/login';
+			return;
+		}
+		try {
+			const data = await apiFetch<{ liked: boolean }>(`/comments/${commentId}/like`, {
+				method: 'POST',
+				headers: getSecurityHeaders('POST'),
+				body: JSON.stringify({})
+			});
+			setComments((prev) =>
+				prev.map((comment) =>
+					comment.id === commentId
+						? {
+								...comment,
+								liked: data.liked,
+								like_count: Math.max(0, (comment.like_count || 0) + (data.liked ? 1 : -1))
+						  }
+						: comment
+				)
+			);
+		} catch {
+			return;
+		}
+	}
+
 	async function uploadCommentImage(file: File, selection = commentSelectionRef.current) {
 		if (!user) {
 			window.location.href = '/login';
@@ -745,6 +772,11 @@ export function PostPage() {
 														</span>
 													</div>
 													<div className="flex items-center gap-2">
+														<Button variant={c.liked ? 'secondary' : 'ghost'} size="sm" onClick={() => toggleCommentLike(c.id)} disabled={!user}>
+															<Heart className="h-4 w-4 text-rose-600" fill={c.liked ? 'currentColor' : 'none'} />
+															<span className="tabular-nums">{c.like_count || 0}</span>
+															<span className="sr-only">{c.liked ? '取消点赞' : '点赞'}</span>
+														</Button>
 														<Button variant="ghost" size="sm" onClick={() => setReplyTo(c)}>
 															<Reply className="h-4 w-4" />
 															<span className="sr-only">回复</span>
@@ -771,12 +803,19 @@ export function PostPage() {
 																			<span className="text-muted-foreground">{formatDate(r.created_at)}</span>
 																		</span>
 																	</div>
-																	{user && (user.role === 'admin' || user.id === r.author_id) ? (
-																		<Button variant="ghost" size="sm" onClick={() => deleteComment(r.id)}>
-																			<Trash2 className="h-4 w-4" />
-																			<span className="sr-only">删除</span>
+																	<div className="flex items-center gap-2">
+																		<Button variant={r.liked ? 'secondary' : 'ghost'} size="sm" onClick={() => toggleCommentLike(r.id)} disabled={!user}>
+																			<Heart className="h-4 w-4 text-rose-600" fill={r.liked ? 'currentColor' : 'none'} />
+																			<span className="tabular-nums">{r.like_count || 0}</span>
+																			<span className="sr-only">{r.liked ? '取消点赞' : '点赞'}</span>
 																		</Button>
-																	) : null}
+																		{user && (user.role === 'admin' || user.id === r.author_id) ? (
+																			<Button variant="ghost" size="sm" onClick={() => deleteComment(r.id)}>
+																				<Trash2 className="h-4 w-4" />
+																				<span className="sr-only">删除</span>
+																			</Button>
+																		) : null}
+																	</div>
 																</div>
 																<div className="prose prose-sm mt-1 max-w-none break-words [&_ul]:list-disc [&_ul]:pl-6 [&_ol]:list-decimal [&_ol]:pl-6 [&_li]:my-1" dangerouslySetInnerHTML={{ __html: renderMarkdownToHtml(r.content || '') }} />
 															</div>

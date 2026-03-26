@@ -49,6 +49,8 @@ export type Comment = {
 	role?: 'admin' | 'user';
 	content: string;
 	created_at: string;
+	like_count?: number;
+	liked?: boolean;
 };
 
 const API_BASE = '/api';
