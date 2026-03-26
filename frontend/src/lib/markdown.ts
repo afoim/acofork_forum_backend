@@ -2,6 +2,8 @@ import { marked } from 'marked';
 import createDOMPurify from 'dompurify';
 import { highlightElement } from '@speed-highlight/core';
 
+import { extractImageUploadToken, isImageUploadPlaceholderUrl } from '@/lib/api';
+
 function escapeHtml(text: string) {
 	return text
 		.replace(/&/g, '&amp;')
@@ -35,6 +37,10 @@ renderer.codespan = (({ text }: { text: string }) => {
 	return `<code class="shj-inline">${escapeHtml(text)}</code>`;
 }) as any;
 renderer.image = (({ href, title, text }: { href: string; title?: string | null; text: string }) => {
+	if (isImageUploadPlaceholderUrl(href || '')) {
+		const token = escapeHtml(extractImageUploadToken(href || ''));
+		return `<div class="rounded-md border border-dashed bg-muted/30 px-3 py-2 text-sm text-muted-foreground" data-upload-placeholder="${token}">图片上传中...</div>`;
+	}
 	const src = escapeHtml(href || '');
 	const alt = escapeHtml(text || '');
 	const caption = escapeHtml(title || text || '');
@@ -44,12 +50,20 @@ renderer.image = (({ href, title, text }: { href: string; title?: string | null;
 }) as any;
 marked.use({ renderer });
 
-export function renderMarkdownToHtml(markdown: string) {
+function sanitizeHtml(html: string) {
 	const windowLike = window as unknown as Window;
 	const DOMPurify = createDOMPurify(windowLike);
-	return DOMPurify.sanitize(marked.parse(markdown) as string, {
-		ADD_ATTR: ['data-fancybox', 'data-caption', 'referrerpolicy']
+	return DOMPurify.sanitize(html, {
+		ADD_ATTR: ['data-fancybox', 'data-caption', 'referrerpolicy', 'data-upload-placeholder']
 	});
+}
+
+export function renderMarkdownToHtml(markdown: string) {
+	return sanitizeHtml(marked.parse(markdown) as string);
+}
+
+export function renderEditorMarkdownToHtml(markdown: string) {
+	return sanitizeHtml(marked.parse(markdown) as string);
 }
 
 export function highlightCodeBlocks(root: ParentNode | null) {

@@ -1,14 +1,14 @@
 import * as React from 'react';
-import { ArrowLeft, Eye, EyeOff, Heart, Image, MoreVertical, Pin, Pencil, Reply, Shield, Trash2, User, X } from 'lucide-react';
+import { ArrowLeft, Heart, MoreVertical, Pin, Pencil, Reply, Shield, Trash2, User, X } from 'lucide-react';
 
+import MDEditor, { commands, type ICommand } from '@uiw/react-md-editor';
 import { TurnstileWidget } from '@/components/turnstile';
 import { PageShell } from '@/components/page-shell';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
-import { Textarea } from '@/components/ui/textarea';
 import { useConfig } from '@/hooks/use-config';
-import { apiFetch, formatDate, getSecurityHeaders, insertTextAtSelection, type Category, type Comment, type Post } from '@/lib/api';
+import { apiFetch, createImageUploadPlaceholder, formatDate, getSecurityHeaders, insertImageUploadPlaceholder, removeImageUploadPlaceholder, replaceImageUploadPlaceholder, type Category, type Comment, type Post } from '@/lib/api';
 import { getToken, getUser, logout } from '@/lib/auth';
 import { attachFancybox, highlightCodeBlocks, renderMarkdownToHtml } from '@/lib/markdown';
 import { validateText } from '@/lib/validators';
@@ -40,12 +40,12 @@ export function PostPage() {
 	const [editUploadingImage, setEditUploadingImage] = React.useState(false);
 	const [editError, setEditError] = React.useState('');
 	const contentRef = React.useRef<HTMLDivElement | null>(null);
-	const [editPreviewOpen, setEditPreviewOpen] = React.useState(true);
-	const editPreviewRef = React.useRef<HTMLDivElement | null>(null);
 	const commentSelectionRef = React.useRef<{ start: number; end: number } | null>(null);
 	const commentTextareaRef = React.useRef<HTMLTextAreaElement | null>(null);
+	const commentImageInputRef = React.useRef<HTMLInputElement | null>(null);
 	const editSelectionRef = React.useRef<{ start: number; end: number } | null>(null);
 	const editTextareaRef = React.useRef<HTMLTextAreaElement | null>(null);
+	const editImageInputRef = React.useRef<HTMLInputElement | null>(null);
 	const [adminMenuOpen, setAdminMenuOpen] = React.useState(false);
 	const adminMenuRef = React.useRef<HTMLDivElement | null>(null);
 	const [allCategories, setAllCategories] = React.useState<Category[]>([]);
@@ -57,7 +57,6 @@ export function PostPage() {
 	}
 
 	const postId = getPostIdFromPath();
-
 	const userId = user?.id ?? null;
 
 	const refresh = React.useCallback(async () => {
@@ -101,16 +100,6 @@ export function PostPage() {
 		const cleanup = attachFancybox(el);
 		return cleanup;
 	}, [post, comments.length, isEditing]);
-
-	React.useEffect(() => {
-		if (!isEditing) return;
-		if (!editPreviewOpen) return;
-		const el = editPreviewRef.current;
-		if (!el) return;
-		highlightCodeBlocks(el);
-		const cleanup = attachFancybox(el);
-		return cleanup;
-	}, [isEditing, editPreviewOpen, editContent]);
 
 	React.useEffect(() => {
 		if (!adminMenuOpen) return;
@@ -170,8 +159,8 @@ export function PostPage() {
 			window.location.href = '/login';
 			return;
 		}
-		const token = getToken();
-		if (!token) {
+		const tokenValue = getToken();
+		if (!tokenValue) {
 			setCommentError('登录已过期，请重新登录');
 			return;
 		}
@@ -180,37 +169,43 @@ export function PostPage() {
 			return;
 		}
 
+		const placeholder = createImageUploadPlaceholder();
+		setCommentError('');
+		setNewComment((prev) => {
+			const insertion = insertImageUploadPlaceholder(prev, selection?.start ?? prev.length, selection?.end ?? prev.length, placeholder);
+			commentSelectionRef.current = { start: insertion.selectionStart, end: insertion.selectionEnd };
+			return insertion.value;
+		});
+		requestAnimationFrame(() => {
+			const textarea = commentTextareaRef.current;
+			if (!textarea) return;
+			const nextSelection = commentSelectionRef.current;
+			textarea.focus();
+			if (nextSelection) textarea.setSelectionRange(nextSelection.start, nextSelection.end);
+		});
+
 		const formData = new FormData();
 		formData.append('file', file);
 		formData.append('type', 'comment');
 		formData.append('post_id', postId || 'general');
 
 		setUploadingCommentImage(true);
-		setCommentError('');
 		try {
 			const headers = getSecurityHeaders('POST', null);
-			const res = await fetch('/api/upload', {
-				method: 'POST',
-				headers: headers,
-				body: formData
-			});
+			const res = await fetch('/api/upload', { method: 'POST', headers, body: formData });
 			if (res.status === 401) {
 				logout();
 				window.location.href = '/login';
 				return;
 			}
 			const data = (await res.json()) as any;
-			if (!res.ok) {
-				throw new Error(data?.error || '上传失败');
-			}
-			const imageUrl = data.url;
-			const markdownImage = `![image](${imageUrl})`;
+			if (!res.ok) throw new Error(data?.error || '上传失败');
 			let nextSelectionStart = 0;
 			setNewComment((prev) => {
-				const insertion = insertTextAtSelection(prev, selection?.start ?? prev.length, selection?.end ?? prev.length, markdownImage);
-				nextSelectionStart = insertion.selectionStart;
-				commentSelectionRef.current = { start: insertion.selectionStart, end: insertion.selectionEnd };
-				return insertion.value;
+				const replacement = replaceImageUploadPlaceholder(prev, placeholder.token, `![image](${data.url})`);
+				nextSelectionStart = replacement.selectionStart;
+				commentSelectionRef.current = { start: replacement.selectionStart, end: replacement.selectionEnd };
+				return replacement.value;
 			});
 			requestAnimationFrame(() => {
 				const textarea = commentTextareaRef.current;
@@ -219,6 +214,11 @@ export function PostPage() {
 				textarea.setSelectionRange(nextSelectionStart, nextSelectionStart);
 			});
 		} catch (e: any) {
+			setNewComment((prev) => {
+				const replacement = removeImageUploadPlaceholder(prev, placeholder.token);
+				commentSelectionRef.current = { start: replacement.selectionStart, end: replacement.selectionEnd };
+				return replacement.value;
+			});
 			setCommentError(String(e?.message || e));
 		} finally {
 			setUploadingCommentImage(false);
@@ -331,8 +331,8 @@ export function PostPage() {
 			window.location.href = '/login';
 			return;
 		}
-		const token = getToken();
-		if (!token) {
+		const tokenValue = getToken();
+		if (!tokenValue) {
 			setEditError('登录已过期，请重新登录');
 			return;
 		}
@@ -345,37 +345,43 @@ export function PostPage() {
 			return;
 		}
 
+		const placeholder = createImageUploadPlaceholder();
+		setEditError('');
+		setEditContent((prev) => {
+			const insertion = insertImageUploadPlaceholder(prev, selection?.start ?? prev.length, selection?.end ?? prev.length, placeholder);
+			editSelectionRef.current = { start: insertion.selectionStart, end: insertion.selectionEnd };
+			return insertion.value;
+		});
+		requestAnimationFrame(() => {
+			const textarea = editTextareaRef.current;
+			if (!textarea) return;
+			const nextSelection = editSelectionRef.current;
+			textarea.focus();
+			if (nextSelection) textarea.setSelectionRange(nextSelection.start, nextSelection.end);
+		});
+
 		const formData = new FormData();
 		formData.append('file', file);
 		formData.append('type', 'post');
 		formData.append('post_id', String(post.id));
 
 		setEditUploadingImage(true);
-		setEditError('');
 		try {
 			const headers = getSecurityHeaders('POST', null);
-			const res = await fetch('/api/upload', {
-				method: 'POST',
-				headers,
-				body: formData
-			});
+			const res = await fetch('/api/upload', { method: 'POST', headers, body: formData });
 			if (res.status === 401) {
 				logout();
 				window.location.href = '/login';
 				return;
 			}
 			const data = (await res.json()) as any;
-			if (!res.ok) {
-				throw new Error(data?.error || '上传失败');
-			}
-			const imageUrl = data.url;
-			const markdownImage = `![image](${imageUrl})`;
+			if (!res.ok) throw new Error(data?.error || '上传失败');
 			let nextSelectionStart = 0;
 			setEditContent((prev) => {
-				const insertion = insertTextAtSelection(prev, selection?.start ?? prev.length, selection?.end ?? prev.length, markdownImage);
-				nextSelectionStart = insertion.selectionStart;
-				editSelectionRef.current = { start: insertion.selectionStart, end: insertion.selectionEnd };
-				return insertion.value;
+				const replacement = replaceImageUploadPlaceholder(prev, placeholder.token, `![image](${data.url})`);
+				nextSelectionStart = replacement.selectionStart;
+				editSelectionRef.current = { start: replacement.selectionStart, end: replacement.selectionEnd };
+				return replacement.value;
 			});
 			requestAnimationFrame(() => {
 				const textarea = editTextareaRef.current;
@@ -384,27 +390,62 @@ export function PostPage() {
 				textarea.setSelectionRange(nextSelectionStart, nextSelectionStart);
 			});
 		} catch (e: any) {
+			setEditContent((prev) => {
+				const replacement = removeImageUploadPlaceholder(prev, placeholder.token);
+				editSelectionRef.current = { start: replacement.selectionStart, end: replacement.selectionEnd };
+				return replacement.value;
+			});
 			setEditError(String(e?.message || e));
 		} finally {
 			setEditUploadingImage(false);
 		}
 	}
 
-	function handleCommentSelection(event: React.SyntheticEvent<HTMLTextAreaElement>) {
+	function handleCommentSelection(target: HTMLTextAreaElement) {
 		commentSelectionRef.current = {
-			start: event.currentTarget.selectionStart ?? 0,
-			end: event.currentTarget.selectionEnd ?? 0
+			start: target.selectionStart ?? 0,
+			end: target.selectionEnd ?? 0
 		};
-		commentTextareaRef.current = event.currentTarget;
+		commentTextareaRef.current = target;
 	}
 
-	function handleEditSelection(event: React.SyntheticEvent<HTMLTextAreaElement>) {
+	function handleEditSelection(target: HTMLTextAreaElement) {
 		editSelectionRef.current = {
-			start: event.currentTarget.selectionStart ?? 0,
-			end: event.currentTarget.selectionEnd ?? 0
+			start: target.selectionStart ?? 0,
+			end: target.selectionEnd ?? 0
 		};
-		editTextareaRef.current = event.currentTarget;
+		editTextareaRef.current = target;
 	}
+
+	const commentEditorCommands = React.useMemo<ICommand[]>(() => {
+		const imageCommand: ICommand = {
+			...commands.image,
+			execute: (state) => {
+				commentSelectionRef.current = {
+					start: state.selection.start,
+					end: state.selection.end
+				};
+				commentImageInputRef.current?.click();
+			}
+		};
+
+		return commands.getCommands().map((command) => (command.keyCommand === 'image' ? imageCommand : command));
+	}, []);
+
+	const editEditorCommands = React.useMemo<ICommand[]>(() => {
+		const imageCommand: ICommand = {
+			...commands.image,
+			execute: (state) => {
+				editSelectionRef.current = {
+					start: state.selection.start,
+					end: state.selection.end
+				};
+				editImageInputRef.current?.click();
+			}
+		};
+
+		return commands.getCommands().map((command) => (command.keyCommand === 'image' ? imageCommand : command));
+	}, []);
 
 	async function saveEdit() {
 		if (!post) return;
@@ -463,13 +504,7 @@ export function PostPage() {
 									<span className="flex flex-wrap items-center gap-x-2 gap-y-1 text-sm font-normal text-muted-foreground">
 										<span className="inline-flex items-center gap-2">
 											{post.author_avatar ? (
-												<img
-													src={post.author_avatar}
-													alt=""
-													className="h-6 w-6 rounded-full object-cover"
-													loading="lazy"
-													referrerPolicy="no-referrer"
-												/>
+												<img src={post.author_avatar} alt="" className="h-6 w-6 rounded-full object-cover" loading="lazy" referrerPolicy="no-referrer" />
 											) : (
 												<span className="inline-flex h-6 w-6 items-center justify-center rounded-full bg-muted text-[10px] text-muted-foreground">
 													<User className="h-4 w-4" />
@@ -495,42 +530,24 @@ export function PostPage() {
 										<span className="tabular-nums">{post.like_count || 0}</span>
 										<span className="sr-only">{post.liked ? '取消点赞' : '点赞'}</span>
 									</Button>
-									<span className="inline-flex items-center gap-1 rounded-md border bg-muted/20 px-2 py-1 text-xs text-muted-foreground">
-										<Eye className="h-4 w-4 text-emerald-600" />
-										<span className="tabular-nums">{post.view_count || 0}</span>
-										<span className="sr-only">观看数</span>
-									</span>
 
 									{user && (user.role === 'admin' || user.id === post.author_id) ? (
-										<>
-											<Button variant="outline" size="sm" onClick={() => setIsEditing((v) => !v)}>
-												{isEditing ? <X className="h-4 w-4" /> : <Pencil className="h-4 w-4" />}
-												<span className="sr-only">{isEditing ? '取消编辑' : '编辑'}</span>
-											</Button>
-										</>
+										<Button variant="outline" size="sm" onClick={() => setIsEditing((v) => !v)}>
+											{isEditing ? <X className="h-4 w-4" /> : <Pencil className="h-4 w-4" />}
+											<span className="sr-only">{isEditing ? '取消编辑' : '编辑'}</span>
+										</Button>
 									) : null}
 
 									{user && (user.role === 'admin' || user.id === post.author_id) ? (
 										<div className="relative" ref={adminMenuRef}>
-											<Button
-												type="button"
-												variant="outline"
-												size="sm"
-												onClick={() => setAdminMenuOpen((v) => !v)}
-												aria-haspopup="menu"
-												aria-expanded={adminMenuOpen}
-											>
+											<Button type="button" variant="outline" size="sm" onClick={() => setAdminMenuOpen((v) => !v)} aria-haspopup="menu" aria-expanded={adminMenuOpen}>
 												<MoreVertical className="h-4 w-4" />
 												<span className="sr-only">更多</span>
 											</Button>
 											{adminMenuOpen ? (
 												<div className="absolute right-0 top-full z-50 mt-2 w-44 rounded-md border bg-background p-1 shadow-md">
 													{user.role === 'admin' ? (
-														<button
-															type="button"
-															className="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-sm hover:bg-muted"
-															onClick={togglePin}
-														>
+														<button type="button" className="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-sm hover:bg-muted" onClick={togglePin}>
 															<Pin className="h-4 w-4" />
 															{post.is_pinned ? '取消置顶' : '置顶'}
 														</button>
@@ -550,20 +567,11 @@ export function PostPage() {
 														<>
 															<div className="my-1 h-px bg-border" />
 															<div className="px-2 py-1 text-xs font-medium text-muted-foreground">移动到分类</div>
-															<button
-																type="button"
-																className="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-sm hover:bg-muted"
-																onClick={() => void adminMovePostCategory(null)}
-															>
+															<button type="button" className="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-sm hover:bg-muted" onClick={() => void adminMovePostCategory(null)}>
 																未分类
 															</button>
 															{allCategories.map((c) => (
-																<button
-																	key={c.id}
-																	type="button"
-																	className="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-sm hover:bg-muted"
-																	onClick={() => void adminMovePostCategory(c.id)}
-																>
+																<button key={c.id} type="button" className="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-sm hover:bg-muted" onClick={() => void adminMovePostCategory(c.id)}>
 																	{c.name}
 																</button>
 															))}
@@ -582,95 +590,61 @@ export function PostPage() {
 											<div className="flex flex-wrap items-center gap-2">
 												<Button type="button" variant="outline" size="sm" onClick={() => setIsEditing(false)}>
 													<X className="h-4 w-4" />
-													<span>{'退出编辑模式'}</span>
+													<span>退出编辑模式</span>
 												</Button>
-												<Button type="button" variant="outline" size="sm" onClick={() => setEditPreviewOpen((v) => !v)}>
-													{editPreviewOpen ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
-													<span>{editPreviewOpen ? '关闭预览' : '打开预览'}</span>
-												</Button>
-												<label className="cursor-pointer">
-													<input
-														type="file"
-														accept="image/*"
-														className="hidden"
-														onChange={(e) => {
-															const f = e.target.files?.[0];
-															if (f) void uploadEditImage(f);
-															e.target.value = '';
-														}}
-													/>
-													<Button type="button" variant="outline" size="sm" disabled={editUploadingImage} asChild>
-														<span>
-															<Image className="h-4 w-4" />
-															<span className="sr-only">{editUploadingImage ? '上传中...' : '上传图片'}</span>
-														</span>
-													</Button>
-												</label>
 												<Button onClick={saveEdit} disabled={editLoading} size="sm" className="ml-auto">
 													{editLoading ? '保存中...' : '保存'}
 												</Button>
 											</div>
 										</div>
-										<div className={`grid gap-4 ${editPreviewOpen ? 'lg:grid-cols-2' : 'lg:grid-cols-1'}`}>
-											<div className={`space-y-2 ${!editPreviewOpen ? 'lg:col-span-1' : ''}`}>
-												<Input value={editTitle} onChange={(e) => setEditTitle(e.target.value)} maxLength={30} />
-												<div className={`${editPreviewOpen ? 'hidden lg:block' : ''}`}>
-													<div className="rounded-md border">
-														<Textarea
-															value={editContent}
-															onChange={(e) => setEditContent(e.target.value)}
-															onSelect={handleEditSelection}
-															onClick={handleEditSelection}
-															onKeyUp={handleEditSelection}
-															onImagePaste={({ file, selectionStart, selectionEnd, target }) => {
-																editSelectionRef.current = { start: selectionStart, end: selectionEnd };
-																editTextareaRef.current = target;
-																void uploadEditImage(file, { start: selectionStart, end: selectionEnd });
-															}}
-															rows={18}
-															className="min-h-[24rem] resize-y border-0 shadow-none focus-visible:ring-0"
-														/>
-													</div>
-												</div>
-												{!editPreviewOpen ? (
-													<div className="lg:hidden">
-														<div className="rounded-md border">
-															<Textarea
-																value={editContent}
-																onChange={(e) => setEditContent(e.target.value)}
-																onSelect={handleEditSelection}
-																onClick={handleEditSelection}
-																onKeyUp={handleEditSelection}
-																onImagePaste={({ file, selectionStart, selectionEnd, target }) => {
-																	editSelectionRef.current = { start: selectionStart, end: selectionEnd };
-																	editTextareaRef.current = target;
-																	void uploadEditImage(file, { start: selectionStart, end: selectionEnd });
-																}}
-																rows={18}
-																className="min-h-[24rem] resize-y border-0 shadow-none focus-visible:ring-0"
-															/>
-														</div>
-													</div>
-												) : null}
-											</div>
-											{editPreviewOpen ? (
-												<div className="min-h-[24rem] rounded-md border bg-muted/20 p-3 lg:max-h-[calc(100dvh-16rem)] lg:overflow-auto">
-													<div className="mb-2 text-xs font-medium text-muted-foreground">预览</div>
-													<div
-														ref={editPreviewRef}
-														className="prose max-w-none break-words [&_ul]:list-disc [&_ul]:pl-6 [&_ol]:list-decimal [&_ol]:pl-6 [&_li]:my-1"
-														dangerouslySetInnerHTML={{ __html: renderMarkdownToHtml(editContent || '') }}
+										<div className="space-y-2">
+											<Input value={editTitle} onChange={(e) => setEditTitle(e.target.value)} maxLength={30} />
+											<div className="space-y-2">
+												<div className="text-sm font-medium">内容 (支持 Markdown)</div>
+												<input
+													ref={editImageInputRef}
+													type="file"
+													accept="image/*"
+													className="hidden"
+													disabled={editUploadingImage}
+													onChange={(event) => {
+														const file = event.target.files?.[0];
+														if (file) void uploadEditImage(file);
+														event.target.value = '';
+													}}
+												/>
+												<div className="overflow-hidden rounded-md border" data-color-mode="light">
+													<MDEditor
+														value={editContent}
+														onChange={(value) => setEditContent(value || '')}
+														commands={editEditorCommands}
+														preview="live"
+														visibleDragbar={false}
+														height={384}
+														textareaProps={{
+															placeholder: editUploadingImage ? '图片上传中...' : undefined,
+															ref: (node) => {
+																editTextareaRef.current = node;
+															},
+															onSelect: (event) => handleEditSelection(event.currentTarget),
+															onClick: (event) => handleEditSelection(event.currentTarget),
+															onKeyUp: (event) => handleEditSelection(event.currentTarget),
+															onPaste: (event) => {
+																const imageItem = Array.from(event.clipboardData?.items ?? []).find((item) => item.kind === 'file' && item.type.startsWith('image/'));
+																const imageFile = imageItem?.getAsFile();
+																if (!imageFile) return;
+																event.preventDefault();
+																handleEditSelection(event.currentTarget);
+																void uploadEditImage(imageFile, { start: event.currentTarget.selectionStart ?? 0, end: event.currentTarget.selectionEnd ?? 0 });
+															}
+														}}
 													/>
 												</div>
-											) : null}
+											</div>
 										</div>
 									</div>
 								) : (
-									<div
-										className="prose max-w-none break-words [&_ul]:list-disc [&_ul]:pl-6 [&_ol]:list-decimal [&_ol]:pl-6 [&_li]:my-1"
-										ref={contentRef}
-										dangerouslySetInnerHTML={{ __html: renderMarkdownToHtml(post.content || '') }}
-									/>
+									<div className="prose max-w-none break-words [&_ul]:list-disc [&_ul]:pl-6 [&_ol]:list-decimal [&_ol]:pl-6 [&_li]:my-1" ref={contentRef} dangerouslySetInnerHTML={{ __html: renderMarkdownToHtml(post.content || '') }} />
 								)}
 							</CardContent>
 						</Card>
@@ -694,46 +668,50 @@ export function PostPage() {
 								<form className="space-y-3" onSubmit={submitComment}>
 									{commentError ? <div className="rounded-md border border-destructive/50 bg-destructive/5 p-3 text-sm text-destructive">{commentError}</div> : null}
 									<div className="space-y-2">
-										<div className="flex items-center justify-end">
-											<label className="cursor-pointer">
-												<input
-													type="file"
-													accept="image/*"
-													className="hidden"
-													onChange={(e) => {
-														const f = e.target.files?.[0];
-														if (f) void uploadCommentImage(f);
-														e.target.value = '';
-													}}
-												/>
-												<Button type="button" variant="outline" size="sm" disabled={uploadingCommentImage} asChild>
-													<span>
-														<Image className="h-4 w-4" />
-														<span className="sr-only">{uploadingCommentImage ? '上传中...' : '上传图片'}</span>
-													</span>
-												</Button>
-											</label>
-										</div>
-										<Textarea
-											value={newComment}
-											onChange={(e) => setNewComment(e.target.value)}
-											onSelect={handleCommentSelection}
-											onClick={handleCommentSelection}
-											onKeyUp={handleCommentSelection}
-											onImagePaste={({ file, selectionStart, selectionEnd, target }) => {
-												commentSelectionRef.current = { start: selectionStart, end: selectionEnd };
-												commentTextareaRef.current = target;
-												void uploadCommentImage(file, { start: selectionStart, end: selectionEnd });
+										<div className="text-sm font-medium">评论 (支持 Markdown)</div>
+										<input
+											ref={commentImageInputRef}
+											type="file"
+											accept="image/*"
+											className="hidden"
+											disabled={uploadingCommentImage}
+											onChange={(event) => {
+												const file = event.target.files?.[0];
+												if (file) void uploadCommentImage(file);
+												event.target.value = '';
 											}}
-											rows={4}
-											placeholder="写下你的评论..."
 										/>
+										<div className="overflow-hidden rounded-md border" data-color-mode="light">
+											<MDEditor
+												value={newComment}
+												onChange={(value) => setNewComment(value || '')}
+												commands={commentEditorCommands}
+												preview="live"
+												visibleDragbar={false}
+												height={220}
+												textareaProps={{
+													placeholder: uploadingCommentImage ? '图片上传中...' : '写下你的评论...',
+													ref: (node) => {
+														commentTextareaRef.current = node;
+													},
+													onSelect: (event) => handleCommentSelection(event.currentTarget),
+													onClick: (event) => handleCommentSelection(event.currentTarget),
+													onKeyUp: (event) => handleCommentSelection(event.currentTarget),
+													onPaste: (event) => {
+														const imageItem = Array.from(event.clipboardData?.items ?? []).find((item) => item.kind === 'file' && item.type.startsWith('image/'));
+														const imageFile = imageItem?.getAsFile();
+														if (!imageFile) return;
+														event.preventDefault();
+														handleCommentSelection(event.currentTarget);
+														void uploadCommentImage(imageFile, { start: event.currentTarget.selectionStart ?? 0, end: event.currentTarget.selectionEnd ?? 0 });
+													}
+												}}
+											/>
+										</div>
 									</div>
 									<TurnstileWidget enabled={enabled} siteKey={siteKey} onToken={setTurnstileToken} resetKey={turnstileResetKey} />
 									<div className="flex items-center gap-2">
-										<Button type="submit" disabled={commentLoading}>
-											{commentLoading ? '发布中...' : '发布评论'}
-										</Button>
+										<Button type="submit" disabled={commentLoading}>{commentLoading ? '发布中...' : '发布评论'}</Button>
 										{!user ? (
 											<Button type="button" variant="outline" onClick={() => (window.location.href = '/login')}>
 												登录后评论
@@ -751,26 +729,9 @@ export function PostPage() {
 												<div className="flex items-center justify-between gap-2">
 													<div className="text-sm">
 														<span className="inline-flex items-center gap-2">
-															{c.avatar_url ? (
-																<img
-																	src={c.avatar_url}
-																	alt=""
-																	className="h-6 w-6 rounded-full object-cover"
-																	loading="lazy"
-																	referrerPolicy="no-referrer"
-																/>
-															) : (
-																<span className="inline-flex h-6 w-6 items-center justify-center rounded-full bg-muted text-[10px] text-muted-foreground">
-																	<User className="h-4 w-4" />
-																</span>
-															)}
+															{c.avatar_url ? <img src={c.avatar_url} alt="" className="h-6 w-6 rounded-full object-cover" loading="lazy" referrerPolicy="no-referrer" /> : <span className="inline-flex h-6 w-6 items-center justify-center rounded-full bg-muted text-[10px] text-muted-foreground"><User className="h-4 w-4" /></span>}
 															<span className="font-medium text-foreground">{c.username}</span>
-															{c.role === 'admin' ? (
-																<span className="inline-flex items-center gap-1 rounded border border-indigo-500/30 bg-indigo-500/10 px-1.5 py-0.5 text-[10px] font-medium text-indigo-700 dark:text-indigo-300">
-																	<Shield className="h-3 w-3" />
-																	<span className="sr-only">管理员</span>
-																</span>
-															) : null}
+															{c.role === 'admin' ? <span className="inline-flex items-center gap-1 rounded border border-indigo-500/30 bg-indigo-500/10 px-1.5 py-0.5 text-[10px] font-medium text-indigo-700 dark:text-indigo-300"><Shield className="h-3 w-3" /><span className="sr-only">管理员</span></span> : null}
 															<span className="text-muted-foreground">{formatDate(c.created_at)}</span>
 														</span>
 													</div>
@@ -787,10 +748,7 @@ export function PostPage() {
 														) : null}
 													</div>
 												</div>
-												<div
-													className="prose prose-sm mt-2 max-w-none break-words [&_ul]:list-disc [&_ul]:pl-6 [&_ol]:list-decimal [&_ol]:pl-6 [&_li]:my-1"
-													dangerouslySetInnerHTML={{ __html: renderMarkdownToHtml(c.content || '') }}
-												/>
+												<div className="prose prose-sm mt-2 max-w-none break-words [&_ul]:list-disc [&_ul]:pl-6 [&_ol]:list-decimal [&_ol]:pl-6 [&_li]:my-1" dangerouslySetInnerHTML={{ __html: renderMarkdownToHtml(c.content || '') }} />
 												{c.replies && c.replies.length ? (
 													<div className="mt-3 space-y-2 border-l pl-3">
 														{c.replies.map((r) => (
@@ -798,26 +756,9 @@ export function PostPage() {
 																<div className="flex items-center justify-between gap-2">
 																	<div className="text-xs">
 																		<span className="inline-flex items-center gap-2">
-																			{r.avatar_url ? (
-																				<img
-																					src={r.avatar_url}
-																					alt=""
-																					className="h-5 w-5 rounded-full object-cover"
-																					loading="lazy"
-																					referrerPolicy="no-referrer"
-																				/>
-																			) : (
-																				<span className="inline-flex h-5 w-5 items-center justify-center rounded-full bg-muted text-[10px] text-muted-foreground">
-																					<User className="h-3.5 w-3.5" />
-																				</span>
-																			)}
+																			{r.avatar_url ? <img src={r.avatar_url} alt="" className="h-5 w-5 rounded-full object-cover" loading="lazy" referrerPolicy="no-referrer" /> : <span className="inline-flex h-5 w-5 items-center justify-center rounded-full bg-muted text-[10px] text-muted-foreground"><User className="h-3.5 w-3.5" /></span>}
 																			<span className="font-medium text-foreground">{r.username}</span>
-																			{r.role === 'admin' ? (
-																				<span className="inline-flex items-center gap-1 rounded border border-indigo-500/30 bg-indigo-500/10 px-1 py-0.5 text-[10px] font-medium text-indigo-700 dark:text-indigo-300">
-																					<Shield className="h-3 w-3" />
-																					<span className="sr-only">管理员</span>
-																				</span>
-																			) : null}
+																			{r.role === 'admin' ? <span className="inline-flex items-center gap-1 rounded border border-indigo-500/30 bg-indigo-500/10 px-1 py-0.5 text-[10px] font-medium text-indigo-700 dark:text-indigo-300"><Shield className="h-3 w-3" /><span className="sr-only">管理员</span></span> : null}
 																			<span className="text-muted-foreground">{formatDate(r.created_at)}</span>
 																		</span>
 																	</div>
@@ -828,10 +769,7 @@ export function PostPage() {
 																		</Button>
 																	) : null}
 																</div>
-																<div
-																className="prose prose-sm mt-1 max-w-none break-words [&_ul]:list-disc [&_ul]:pl-6 [&_ol]:list-decimal [&_ol]:pl-6 [&_li]:my-1"
-																dangerouslySetInnerHTML={{ __html: renderMarkdownToHtml(r.content || '') }}
-															/>
+																<div className="prose prose-sm mt-1 max-w-none break-words [&_ul]:list-disc [&_ul]:pl-6 [&_ol]:list-decimal [&_ol]:pl-6 [&_li]:my-1" dangerouslySetInnerHTML={{ __html: renderMarkdownToHtml(r.content || '') }} />
 															</div>
 														))}
 													</div>

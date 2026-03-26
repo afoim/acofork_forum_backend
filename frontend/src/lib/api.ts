@@ -91,6 +91,14 @@ export type TextInsertResult = {
 	selectionEnd: number;
 };
 
+export type UploadPlaceholder = {
+	token: string;
+	markdown: string;
+};
+
+const UPLOAD_PLACEHOLDER_PREFIX = 'uploading:';
+const UPLOAD_PLACEHOLDER_ALT = '上传中...';
+
 export function insertTextAtSelection(value: string, selectionStart: number, selectionEnd: number, insertedText: string): TextInsertResult {
 	const safeStart = Math.max(0, Math.min(selectionStart, value.length));
 	const safeEnd = Math.max(safeStart, Math.min(selectionEnd, value.length));
@@ -113,6 +121,53 @@ export function insertTextAtSelection(value: string, selectionStart: number, sel
 		selectionStart: nextSelection,
 		selectionEnd: nextSelection
 	};
+}
+
+export function createImageUploadPlaceholder(): UploadPlaceholder {
+	const token = crypto.randomUUID();
+	return {
+		token,
+		markdown: getImageUploadPlaceholderMarkdown(token)
+	};
+}
+
+export function getImageUploadPlaceholderMarkdown(token: string) {
+	return `![${UPLOAD_PLACEHOLDER_ALT}](${UPLOAD_PLACEHOLDER_PREFIX}${token})`;
+}
+
+export function isImageUploadPlaceholderUrl(url: string) {
+	return url.startsWith(UPLOAD_PLACEHOLDER_PREFIX);
+}
+
+export function extractImageUploadToken(url: string) {
+	return isImageUploadPlaceholderUrl(url) ? url.slice(UPLOAD_PLACEHOLDER_PREFIX.length) : '';
+}
+
+export function insertImageUploadPlaceholder(value: string, selectionStart: number, selectionEnd: number, placeholder: UploadPlaceholder) {
+	return insertTextAtSelection(value, selectionStart, selectionEnd, placeholder.markdown);
+}
+
+export function replaceImageUploadPlaceholder(value: string, token: string, nextMarkdown: string): TextInsertResult {
+	const placeholder = getImageUploadPlaceholderMarkdown(token);
+	const index = value.indexOf(placeholder);
+	if (index === -1) {
+		return {
+			value,
+			selectionStart: value.length,
+			selectionEnd: value.length
+		};
+	}
+	const nextValue = `${value.slice(0, index)}${nextMarkdown}${value.slice(index + placeholder.length)}`;
+	const nextSelection = index + nextMarkdown.length;
+	return {
+		value: nextValue,
+		selectionStart: nextSelection,
+		selectionEnd: nextSelection
+	};
+}
+
+export function removeImageUploadPlaceholder(value: string, token: string): TextInsertResult {
+	return replaceImageUploadPlaceholder(value, token, '');
 }
 
 export function formatDate(dateString: string | null | undefined) {

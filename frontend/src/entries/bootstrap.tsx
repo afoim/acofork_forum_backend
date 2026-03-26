@@ -1,5 +1,7 @@
 import '@/styles/globals.css';
 import '@fancyapps/ui/dist/fancybox/fancybox.css';
+import '@uiw/react-md-editor/markdown-editor.css';
+import '@uiw/react-markdown-preview/markdown.css';
 import { createRoot } from 'react-dom/client';
 import * as React from 'react';
 import { checkSession } from '@/lib/api';

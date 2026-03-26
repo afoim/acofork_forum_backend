@@ -1,17 +1,17 @@
 import * as React from 'react';
-import { ChevronDown, ChevronLeft, ChevronRight, ChevronUp, Eye, EyeOff, Heart, Image, MessageCircle, MoreVertical, Pin, RefreshCw, Search, Shield, Trash2, User, X } from 'lucide-react';
+import { ChevronDown, ChevronLeft, ChevronRight, ChevronUp, Eye, Heart, MessageCircle, MoreVertical, Pin, RefreshCw, Search, Shield, Trash2, User, X } from 'lucide-react';
 
+import MDEditor, { commands, type ICommand } from '@uiw/react-md-editor';
 import { TurnstileWidget } from '@/components/turnstile';
 import { PageShell } from '@/components/page-shell';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
-import { Textarea } from '@/components/ui/textarea';
 import { useConfig } from '@/hooks/use-config';
-import { apiFetch, formatDate, getSecurityHeaders, insertTextAtSelection, type Category, type Post } from '@/lib/api';
+import { apiFetch, createImageUploadPlaceholder, formatDate, getSecurityHeaders, insertImageUploadPlaceholder, removeImageUploadPlaceholder, replaceImageUploadPlaceholder, type Category, type Post } from '@/lib/api';
 import { getToken, getUser, logout } from '@/lib/auth';
-import { attachFancybox, highlightCodeBlocks, renderMarkdownToHtml } from '@/lib/markdown';
+import { renderMarkdownToHtml } from '@/lib/markdown';
 import { validateText } from '@/lib/validators';
 
 export function IndexPage() {
@@ -34,16 +34,15 @@ export function IndexPage() {
 	const [newTitle, setNewTitle] = React.useState('');
 	const [newContent, setNewContent] = React.useState('');
 	const [newCategoryId, setNewCategoryId] = React.useState<string>('');
-	const [previewOpen, setPreviewOpen] = React.useState(true);
 	const [createOpen, setCreateOpen] = React.useState(false);
 	const [createLoading, setCreateLoading] = React.useState(false);
 	const [createError, setCreateError] = React.useState('');
 	const [turnstileToken, setTurnstileToken] = React.useState('');
 	const [turnstileResetKey, setTurnstileResetKey] = React.useState(0);
 	const [uploadingImage, setUploadingImage] = React.useState(false);
-	const previewRef = React.useRef<HTMLDivElement | null>(null);
 	const newContentSelectionRef = React.useRef<{ start: number; end: number } | null>(null);
 	const newContentTextareaRef = React.useRef<HTMLTextAreaElement | null>(null);
+	const newContentImageInputRef = React.useRef<HTMLInputElement | null>(null);
 	const [adminMenuPostId, setAdminMenuPostId] = React.useState<number | null>(null);
 	const [adminActionPostId, setAdminActionPostId] = React.useState<number | null>(null);
 	const [sortOption, setSortOption] = React.useState('time_desc');
@@ -123,15 +122,6 @@ export function IndexPage() {
 			window.history.replaceState({}, document.title, `${window.location.pathname}${params.toString() ? `?${params.toString()}` : ''}`);
 		}
 	}, []);
-
-	React.useEffect(() => {
-		if (!previewOpen) return;
-		const el = previewRef.current;
-		if (!el) return;
-		highlightCodeBlocks(el);
-		const cleanup = attachFancybox(el);
-		return cleanup;
-	}, [previewOpen, newContent]);
 
 	React.useEffect(() => {
 		if (adminMenuPostId == null) return;
@@ -223,18 +213,36 @@ export function IndexPage() {
 			return;
 		}
 
+		const placeholder = createImageUploadPlaceholder();
+		let inserted = false;
+		setCreateError('');
+		setNewContent((prev) => {
+			const insertion = insertImageUploadPlaceholder(prev, selection?.start ?? prev.length, selection?.end ?? prev.length, placeholder);
+			newContentSelectionRef.current = { start: insertion.selectionStart, end: insertion.selectionEnd };
+			inserted = true;
+			return insertion.value;
+		});
+		if (!inserted) return;
+
+		requestAnimationFrame(() => {
+			const textarea = newContentTextareaRef.current;
+			if (!textarea) return;
+			const nextSelection = newContentSelectionRef.current;
+			textarea.focus();
+			if (nextSelection) textarea.setSelectionRange(nextSelection.start, nextSelection.end);
+		});
+
 		const formData = new FormData();
 		formData.append('file', file);
 		formData.append('type', 'post');
 		formData.append('post_id', 'new');
 
 		setUploadingImage(true);
-		setCreateError('');
 		try {
 			const headers = getSecurityHeaders('POST', null);
 			const res = await fetch('/api/upload', {
 				method: 'POST',
-				headers: headers,
+				headers,
 				body: formData
 			});
 			if (res.status === 401) {
@@ -246,14 +254,13 @@ export function IndexPage() {
 			if (!res.ok) {
 				throw new Error(data?.error || '上传失败');
 			}
-			const imageUrl = data.url;
-			const markdownImage = `![image](${imageUrl})`;
+			const markdownImage = `![image](${data.url})`;
 			let nextSelectionStart = 0;
 			setNewContent((prev) => {
-				const insertion = insertTextAtSelection(prev, selection?.start ?? prev.length, selection?.end ?? prev.length, markdownImage);
-				nextSelectionStart = insertion.selectionStart;
-				newContentSelectionRef.current = { start: insertion.selectionStart, end: insertion.selectionEnd };
-				return insertion.value;
+				const replacement = replaceImageUploadPlaceholder(prev, placeholder.token, markdownImage);
+				nextSelectionStart = replacement.selectionStart;
+				newContentSelectionRef.current = { start: replacement.selectionStart, end: replacement.selectionEnd };
+				return replacement.value;
 			});
 			requestAnimationFrame(() => {
 				const textarea = newContentTextareaRef.current;
@@ -262,6 +269,11 @@ export function IndexPage() {
 				textarea.setSelectionRange(nextSelectionStart, nextSelectionStart);
 			});
 		} catch (e: any) {
+			setNewContent((prev) => {
+				const replacement = removeImageUploadPlaceholder(prev, placeholder.token);
+				newContentSelectionRef.current = { start: replacement.selectionStart, end: replacement.selectionEnd };
+				return replacement.value;
+			});
 			setCreateError(String(e?.message || e));
 		} finally {
 			setUploadingImage(false);
@@ -334,13 +346,28 @@ export function IndexPage() {
 		return htmlMatch?.[1] || '';
 	}
 
-	function handleNewContentSelection(event: React.SyntheticEvent<HTMLTextAreaElement>) {
+	function handleNewContentSelection(target: HTMLTextAreaElement) {
 		newContentSelectionRef.current = {
-			start: event.currentTarget.selectionStart ?? 0,
-			end: event.currentTarget.selectionEnd ?? 0
+			start: target.selectionStart ?? 0,
+			end: target.selectionEnd ?? 0
 		};
-		newContentTextareaRef.current = event.currentTarget;
+		newContentTextareaRef.current = target;
 	}
+
+	const editorCommands = React.useMemo<ICommand[]>(() => {
+		const imageCommand: ICommand = {
+			...commands.image,
+			execute: (state) => {
+				newContentSelectionRef.current = {
+					start: state.selection.start,
+					end: state.selection.end
+				};
+				newContentImageInputRef.current?.click();
+			}
+		};
+
+		return commands.getCommands().map((command) => (command.keyCommand === 'image' ? imageCommand : command));
+	}, []);
 
 	return (
 		<PageShell>
@@ -451,123 +478,89 @@ export function IndexPage() {
 								<div className="text-sm text-muted-foreground">点击右侧按钮展开编辑器。</div>
 							) : (
 								<form className="space-y-4" onSubmit={createPost}>
-								{createError ? <div className="rounded-md border border-destructive/50 bg-destructive/5 p-3 text-sm text-destructive">{createError}</div> : null}
-								<div className="sticky top-20 z-20 rounded-md border bg-background/95 p-3 shadow-sm backdrop-blur supports-[backdrop-filter]:bg-background/80">
-									<div className="flex flex-wrap items-center gap-2">
-										<Button type="button" variant="outline" size="sm" onClick={() => setCreateOpen(false)}>
-											<ChevronUp className="h-4 w-4" />
-											<span>收起编辑器</span>
-										</Button>
-										<Button type="button" variant="outline" size="sm" onClick={() => setPreviewOpen((v) => !v)}>
-											{previewOpen ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
-											<span>{previewOpen ? '关闭预览' : '打开预览'}</span>
-										</Button>
-										<Button type="submit" disabled={createLoading} size="sm" className="ml-auto">
-											{createLoading ? '发布中...' : '发布'}
-										</Button>
-									</div>
-								</div>
-								<div className="space-y-4">
-									<div className="space-y-2">
-										<Label htmlFor="new-title">标题</Label>
-										<Input id="new-title" maxLength={30} value={newTitle} onChange={(e) => setNewTitle(e.target.value)} required />
-									</div>
-									<div className="space-y-2">
-										<Label htmlFor="new-category">分类 (可选)</Label>
-										<select
-											id="new-category"
-											className="h-9 w-full rounded-md border bg-background px-3 text-sm"
-											value={newCategoryId}
-											onChange={(e) => setNewCategoryId(e.target.value)}
-										>
-											<option value="">无分类</option>
-											{categories.map((c) => (
-												<option key={c.id} value={String(c.id)}>
-													{c.name}
-												</option>
-											))}
-										</select>
-									</div>
-									<TurnstileWidget enabled={enabled} siteKey={siteKey} onToken={setTurnstileToken} resetKey={turnstileResetKey} />
-								</div>
-								<div className={`grid gap-4 ${previewOpen ? 'lg:grid-cols-2' : 'lg:grid-cols-1'}`}>
-									<div className="space-y-2">
-										<div className="flex items-center justify-between gap-2">
-											<Label htmlFor="new-content">内容 (支持 Markdown)</Label>
-											<label className="cursor-pointer">
-												<input
-													type="file"
-													accept="image/*"
-													className="hidden"
-													onChange={(e) => {
-														const f = e.target.files?.[0];
-														if (f) void uploadPostImage(f);
-														e.target.value = '';
-													}}
-												/>
-												<Button type="button" variant="outline" size="sm" disabled={uploadingImage} asChild>
-													<span>
-														<Image className="h-4 w-4" />
-														<span className="sr-only">{uploadingImage ? '上传中...' : '上传图片'}</span>
-													</span>
-												</Button>
-											</label>
+									{createError ? <div className="rounded-md border border-destructive/50 bg-destructive/5 p-3 text-sm text-destructive">{createError}</div> : null}
+									<div className="sticky top-20 z-20 rounded-md border bg-background/95 p-3 shadow-sm backdrop-blur supports-[backdrop-filter]:bg-background/80">
+										<div className="flex flex-wrap items-center gap-2">
+											<Button type="button" variant="outline" size="sm" onClick={() => setCreateOpen(false)}>
+												<ChevronUp className="h-4 w-4" />
+												<span>收起编辑器</span>
+											</Button>
+											<Button type="submit" disabled={createLoading} size="sm" className="ml-auto">
+												{createLoading ? '发布中...' : '发布'}
+											</Button>
 										</div>
-										<div className={`${previewOpen ? 'hidden lg:block' : ''}`}>
-											<div className="rounded-md border">
-												<Textarea
-													id="new-content"
-													value={newContent}
-													onChange={(e) => setNewContent(e.target.value)}
-													onSelect={handleNewContentSelection}
-													onClick={handleNewContentSelection}
-													onKeyUp={handleNewContentSelection}
-													onImagePaste={({ file, selectionStart, selectionEnd, target }) => {
-														newContentSelectionRef.current = { start: selectionStart, end: selectionEnd };
-														newContentTextareaRef.current = target;
-														void uploadPostImage(file, { start: selectionStart, end: selectionEnd });
-													}}
-													rows={18}
-													required
-													className="min-h-[24rem] resize-y border-0 shadow-none focus-visible:ring-0"
-												/>
-											</div>
-										</div>
-										{!previewOpen ? (
-											<div className="lg:hidden">
-												<div className="rounded-md border">
-													<Textarea
-															id="new-content-mobile"
-															value={newContent}
-															onChange={(e) => setNewContent(e.target.value)}
-															onSelect={handleNewContentSelection}
-															onClick={handleNewContentSelection}
-															onKeyUp={handleNewContentSelection}
-															onImagePaste={({ file, selectionStart, selectionEnd, target }) => {
-																newContentSelectionRef.current = { start: selectionStart, end: selectionEnd };
-																newContentTextareaRef.current = target;
-																void uploadPostImage(file, { start: selectionStart, end: selectionEnd });
-															}}
-															rows={18}
-															required
-															className="min-h-[24rem] resize-y border-0 shadow-none focus-visible:ring-0"
-														/>
-												</div>
-											</div>
-										) : null}
 									</div>
-									{previewOpen ? (
-										<div className="min-h-[24rem] rounded-md border bg-muted/20 p-3 lg:max-h-[calc(100dvh-16rem)] lg:overflow-auto">
-											<div className="mb-2 text-xs font-medium text-muted-foreground">预览</div>
-											<div
-												ref={previewRef}
-												className="prose max-w-none break-words [&_ul]:list-disc [&_ul]:pl-6 [&_ol]:list-decimal [&_ol]:pl-6 [&_li]:my-1"
-												dangerouslySetInnerHTML={{ __html: renderMarkdownToHtml(newContent || '') }}
+									<div className="space-y-4">
+										<div className="space-y-2">
+											<Label htmlFor="new-title">标题</Label>
+											<Input id="new-title" maxLength={30} value={newTitle} onChange={(e) => setNewTitle(e.target.value)} required />
+										</div>
+										<div className="space-y-2">
+											<Label htmlFor="new-category">分类 (可选)</Label>
+											<select
+												id="new-category"
+												className="h-9 w-full rounded-md border bg-background px-3 text-sm"
+												value={newCategoryId}
+												onChange={(e) => setNewCategoryId(e.target.value)}
+											>
+												<option value="">无分类</option>
+												{categories.map((c) => (
+													<option key={c.id} value={String(c.id)}>
+														{c.name}
+													</option>
+												))}
+											</select>
+										</div>
+										<TurnstileWidget enabled={enabled} siteKey={siteKey} onToken={setTurnstileToken} resetKey={turnstileResetKey} />
+									</div>
+									<div className="space-y-2">
+										<Label htmlFor="new-content">内容 (支持 Markdown)</Label>
+										<input
+											ref={newContentImageInputRef}
+											type="file"
+											accept="image/*"
+											className="hidden"
+											disabled={uploadingImage}
+											onChange={(event) => {
+												const file = event.target.files?.[0];
+												if (file) void uploadPostImage(file);
+												event.target.value = '';
+											}}
+										/>
+										<div className="overflow-hidden rounded-md border" data-color-mode="light">
+											<MDEditor
+												value={newContent}
+												onChange={(value) => setNewContent(value || '')}
+												commands={editorCommands}
+												preview="live"
+												visibleDragbar={false}
+												height={384}
+												textareaProps={{
+													id: 'new-content',
+													placeholder: uploadingImage ? '图片上传中...' : '请输入内容',
+													required: true,
+													ref: (node) => {
+														newContentTextareaRef.current = node;
+													},
+													onSelect: (event) => handleNewContentSelection(event.currentTarget),
+													onClick: (event) => handleNewContentSelection(event.currentTarget),
+													onKeyUp: (event) => handleNewContentSelection(event.currentTarget),
+													onPaste: (event) => {
+														const imageItem = Array.from(event.clipboardData?.items ?? []).find((item) => item.kind === 'file' && item.type.startsWith('image/'));
+														const imageFile = imageItem?.getAsFile();
+														if (!imageFile) return;
+														event.preventDefault();
+														handleNewContentSelection(event.currentTarget);
+														void uploadPostImage(imageFile, {
+															start: event.currentTarget.selectionStart ?? 0,
+															end: event.currentTarget.selectionEnd ?? 0
+														});
+													}
+												}}
 											/>
 										</div>
-									) : null}
-								</div>
-							</form>
+									</div>
+								</form>
 							)}
 						</CardContent>
 					</Card>
