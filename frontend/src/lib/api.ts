@@ -21,6 +21,24 @@ export type Category = {
 	created_at: string;
 };
 
+export type AdminEmailTestResult = {
+	template: string;
+	label: string;
+	success: boolean;
+	error?: string;
+};
+
+export type AdminEmailTestRequest = {
+	to: string;
+	template: string;
+	payload?: Record<string, string>;
+};
+
+export type AdminEmailTestResponse = {
+	success: boolean;
+	results: AdminEmailTestResult[];
+};
+
 export type Post = {
 	id: number;
 	author_id: number;
@@ -85,6 +103,14 @@ export async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> 
 export async function checkSession(): Promise<SessionInfo> {
 	return apiFetch<SessionInfo>('/session', {
 		headers: getSecurityHeaders('GET')
+	});
+}
+
+export async function adminTestEmail(payload: AdminEmailTestRequest): Promise<AdminEmailTestResponse> {
+	return apiFetch<AdminEmailTestResponse>('/admin/email/test', {
+		method: 'POST',
+		headers: getSecurityHeaders('POST'),
+		body: JSON.stringify(payload)
 	});
 }
 

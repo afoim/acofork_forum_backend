@@ -70,6 +70,239 @@ function hasRestrictedKeywords(username: string): boolean {
 	return restricted.some(keyword => username.toLowerCase().includes(keyword.toLowerCase()));
 }
 
+type EmailTemplatePayload = Record<string, string>;
+
+type EmailTemplateDefinition = {
+	key: string;
+	label: string;
+	requiredFields: string[];
+	defaults: (origin: string) => EmailTemplatePayload;
+	build: (payload: EmailTemplatePayload) => { subject: string; html: string };
+};
+
+function escapeHtml(value: string): string {
+	return value
+		.replace(/&/g, '&amp;')
+		.replace(/</g, '&lt;')
+		.replace(/>/g, '&gt;')
+		.replace(/"/g, '&quot;')
+		.replace(/'/g, '&#39;');
+}
+
+function isValidEmail(email: string): boolean {
+	return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
+}
+
+const EMAIL_TEMPLATE_DEFINITIONS: EmailTemplateDefinition[] = [
+	{
+		key: 'smtp_test',
+		label: 'SMTP 测试邮件',
+		requiredFields: [],
+		defaults: () => ({}),
+		build: () => ({
+			subject: '测试邮件',
+			html: '<h1>测试邮件发送成功</h1><p>这是一封用于验证 SMTP 配置的测试邮件。</p>'
+		})
+	},
+	{
+		key: 'reset_password',
+		label: '密码重置邮件',
+		requiredFields: ['resetLink'],
+		defaults: (origin) => ({
+			resetLink: `${origin}/reset?token=test-reset-token`
+		}),
+		build: (payload) => ({
+			subject: '密码重置请求',
+			html: `
+					<h1>密码重置请求</h1>
+					<p>我们收到了您的密码重置申请，请点击下方链接继续操作：</p>
+					<a href="${payload.resetLink}">立即重置密码</a>
+					<p>如果这不是您本人操作，请忽略此邮件。</p>
+					<p>该链接将在 1 小时后失效。</p>
+				`
+		})
+	},
+	{
+		key: 'change_email_confirm',
+		label: '更换邮箱确认邮件',
+		requiredFields: ['newEmail', 'verifyLink'],
+		defaults: (origin) => ({
+			newEmail: 'new-email@example.com',
+			verifyLink: `${origin}/api/verify-email-change?token=test-email-change-token`
+		}),
+		build: (payload) => ({
+			subject: '确认更换邮箱',
+			html: `
+					<h1>确认更换邮箱</h1>
+					<p>您正在将账户邮箱更换为 <strong>${escapeHtml(payload.newEmail)}</strong>。</p>
+					<p>请点击下方链接完成确认：</p>
+					<a href="${payload.verifyLink}">确认更换邮箱</a>
+					<p>如果这不是您本人操作，请忽略此邮件。</p>
+				`
+		})
+	},
+	{
+		key: 'register_verify',
+		label: '注册验证邮件',
+		requiredFields: ['username', 'verifyLink'],
+		defaults: (origin) => ({
+			username: '测试用户',
+			verifyLink: `${origin}/api/verify?token=test-register-verify-token`
+		}),
+		build: (payload) => ({
+			subject: '请验证您的邮箱',
+			html: `
+					<h1>${escapeHtml(payload.username)}，欢迎加入论坛！</h1>
+					<p>请点击下方链接验证您的邮箱地址：</p>
+					<a href="${payload.verifyLink}">立即验证邮箱</a>
+					<p>如果这不是您本人操作，请忽略此邮件。</p>
+				`
+		})
+	},
+	{
+		key: 'admin_resend_verify',
+		label: '后台重发验证邮件',
+		requiredFields: ['username', 'verifyLink'],
+		defaults: (origin) => ({
+			username: '测试用户',
+			verifyLink: `${origin}/api/verify?token=test-admin-resend-token`
+		}),
+		build: (payload) => ({
+			subject: '请验证您的邮箱',
+			html: `
+					<h1>${escapeHtml(payload.username)}，您好！</h1>
+					<p>请点击下方链接验证您的邮箱地址：</p>
+					<a href="${payload.verifyLink}">立即验证邮箱</a>
+					<p>如果这不是您本人操作，请忽略此邮件。</p>
+				`
+		})
+	},
+	{
+		key: 'admin_avatar_updated',
+		label: '后台头像更新通知',
+		requiredFields: [],
+		defaults: () => ({}),
+		build: () => ({
+			subject: '您的头像已更新',
+			html: `
+					<h1>头像已更新</h1>
+					<p>管理员已为您更新头像。</p>
+					<p>如果这不是您预期的操作，请及时联系管理员。</p>
+				`
+		})
+	},
+	{
+		key: 'admin_username_updated',
+		label: '后台用户名更新通知',
+		requiredFields: ['username'],
+		defaults: () => ({
+			username: '测试用户'
+		}),
+		build: (payload) => ({
+			subject: '您的用户名已修改',
+			html: `
+					<h1>用户名已修改</h1>
+					<p>您的用户名已被管理员修改为 <strong>${escapeHtml(payload.username)}</strong>。</p>
+					<p>如有疑问，请联系管理员。</p>
+				`
+		})
+	},
+	{
+		key: 'admin_manual_verified',
+		label: '后台手动验证通知',
+		requiredFields: ['username'],
+		defaults: () => ({
+			username: '测试用户'
+		}),
+		build: (payload) => ({
+			subject: '您的账户已通过验证',
+			html: `
+					<h1>账户已验证</h1>
+					<p>您的账户（用户名：<strong>${escapeHtml(payload.username)}</strong>）已通过管理员手动验证。</p>
+					<p>您现在可以登录并使用全部功能。</p>
+				`
+		})
+	},
+	{
+		key: 'admin_account_deleted',
+		label: '后台删号通知',
+		requiredFields: ['username'],
+		defaults: () => ({
+			username: '测试用户'
+		}),
+		build: (payload) => ({
+			subject: '您的账户已被删除',
+			html: `
+					<h1>账户已删除</h1>
+					<p>您的账户（用户名：<strong>${escapeHtml(payload.username)}</strong>）已被管理员删除。</p>
+					<p>如果您认为这是误操作，请尽快联系管理员。</p>
+				`
+		})
+	},
+	{
+		key: 'post_new_comment',
+		label: '帖子新评论提醒',
+		requiredFields: ['commenterName', 'postTitle', 'commentContent', 'postUrl'],
+		defaults: (origin) => ({
+			commenterName: '测试评论者',
+			postTitle: '示例帖子标题',
+			commentContent: '这是一条用于测试的新评论内容。',
+			postUrl: `${origin}/post?id=1`
+		}),
+		build: (payload) => ({
+			subject: `您的帖子有新评论：${payload.postTitle}`,
+			html: `
+					<h1>您的帖子有新评论</h1>
+					<p><strong>${escapeHtml(payload.commenterName)}</strong> 评论了您的帖子“<strong>${escapeHtml(payload.postTitle)}</strong>”：</p>
+					<blockquote>${escapeHtml(payload.commentContent)}</blockquote>
+					<p><a href="${payload.postUrl}">查看评论</a></p>
+					<p style="font-size:0.8em;color:#666;">您收到这封邮件，是因为您已开启帖子相关邮件提醒。</p>
+				`
+		})
+	},
+	{
+		key: 'comment_new_reply',
+		label: '评论新回复提醒',
+		requiredFields: ['commenterName', 'postTitle', 'replyContent', 'postUrl'],
+		defaults: (origin) => ({
+			commenterName: '测试评论者',
+			postTitle: '示例帖子标题',
+			replyContent: '这是一条用于测试的新回复内容。',
+			postUrl: `${origin}/post?id=1`
+		}),
+		build: (payload) => ({
+			subject: '您的评论有新回复',
+			html: `
+					<h1>您的评论有新回复</h1>
+					<p><strong>${escapeHtml(payload.commenterName)}</strong> 回复了您在“<strong>${escapeHtml(payload.postTitle)}</strong>”下的评论：</p>
+					<blockquote>${escapeHtml(payload.replyContent)}</blockquote>
+					<p><a href="${payload.postUrl}">查看回复</a></p>
+					<p style="font-size:0.8em;color:#666;">您收到这封邮件，是因为您已开启帖子相关邮件提醒。</p>
+				`
+		})
+	}
+];
+
+const EMAIL_TEMPLATE_MAP = Object.fromEntries(EMAIL_TEMPLATE_DEFINITIONS.map((template) => [template.key, template])) as Record<string, EmailTemplateDefinition>;
+
+function buildEmailTemplate(templateKey: string, origin: string, payload: EmailTemplatePayload = {}) {
+	const template = EMAIL_TEMPLATE_MAP[templateKey];
+	if (!template) {
+		throw new Error('无效的邮件模板');
+	}
+	const mergedPayload = { ...template.defaults(origin), ...payload };
+	for (const field of template.requiredFields) {
+		if (!mergedPayload[field]) {
+			throw new Error(`模板 ${template.label} 缺少必填字段：${field}`);
+		}
+	}
+	return {
+		template,
+		payload: mergedPayload,
+		message: template.build(mergedPayload)
+	};
+}
+
 async function verifyTurnstile(token: string, ip: string, secretKey: string): Promise<boolean> {
 	const formData = new FormData();
 	formData.append('secret', secretKey);
@@ -134,6 +367,10 @@ export default {
 		const getSessionTtlDays = async (): Promise<number> => {
 			const setting = await env.forum_db.prepare('SELECT value FROM settings WHERE key = ?').bind(SESSION_TTL_SETTING_KEY).first();
 			return normalizeSessionTtlDays(setting?.value);
+		};
+		const sendEmailByTemplate = async (to: string, templateKey: string, payload: EmailTemplatePayload = {}) => {
+			const { message } = buildEmailTemplate(templateKey, url.origin, payload);
+			await sendEmail(to, message.subject, message.html, env);
 		};
 
 		// Helper to handle errors
@@ -668,16 +905,8 @@ export default {
 					.bind(token, expires, user.id).run();
 
 				const resetLink = `${url.origin}/reset?token=${token}`;
-				
-				const emailHtml = `
-					<h1>密码重置请求</h1>
-					<p>我们收到了您的密码重置申请，请点击下方链接继续操作：</p>
-					<a href="${resetLink}">立即重置密码</a>
-					<p>如果这不是您本人操作，请忽略此邮件。</p>
-					<p>该链接将在 1 小时后失效。</p>
-				`;
 
-				ctx.waitUntil(sendEmail(email, '密码重置请求', emailHtml, env).catch(console.error));
+				ctx.waitUntil(sendEmailByTemplate(email, 'reset_password', { resetLink }).catch(console.error));
 				return jsonResponse({ success: true });
 			} catch (e) {
 				return handleError(e);
@@ -779,15 +1008,8 @@ export default {
 				await security.logAudit(userPayload.id, 'CHANGE_EMAIL_INIT', 'user', String(user_id), { new_email }, request);
 
 				const verifyLink = `${url.origin}/api/verify-email-change?token=${token}`;
-				const emailHtml = `
-					<h1>确认更换邮箱</h1>
-					<p>您正在将账户邮箱更换为 <strong>${new_email}</strong>。</p>
-					<p>请点击下方链接完成确认：</p>
-					<a href="${verifyLink}">确认更换邮箱</a>
-					<p>如果这不是您本人操作，请忽略此邮件。</p>
-				`;
 
-				ctx.waitUntil(sendEmail(new_email, '确认更换邮箱', emailHtml, env).catch(console.error));
+				ctx.waitUntil(sendEmailByTemplate(new_email, 'change_email_confirm', { newEmail: new_email, verifyLink }).catch(console.error));
 				return jsonResponse({ success: true });
 			} catch (e) {
 				return handleError(e);
@@ -848,12 +1070,7 @@ export default {
 					const notifyAvatar = await env.forum_db.prepare("SELECT value FROM settings WHERE key = 'notify_on_avatar_change'").first();
 					if (notifyAvatar && notifyAvatar.value === '1') {
 						const user = await env.forum_db.prepare('SELECT email, username FROM users WHERE id = ?').bind(id).first();
-						const emailHtml = `
-							<h1>头像已更新</h1>
-							<p>管理员已为您更新头像。</p>
-							<p>如果这不是您预期的操作，请及时联系管理员。</p>
-						`;
-						ctx.waitUntil(sendEmail(user.email, '您的头像已更新', emailHtml, env).catch(console.error));
+						ctx.waitUntil(sendEmailByTemplate(user.email, 'admin_avatar_updated').catch(console.error));
 					}
 				}
 				if (username) {
@@ -868,12 +1085,7 @@ export default {
 					const notifyUsername = await env.forum_db.prepare("SELECT value FROM settings WHERE key = 'notify_on_username_change'").first();
 					if (notifyUsername && notifyUsername.value === '1') {
 						const user = await env.forum_db.prepare('SELECT email, username FROM users WHERE id = ?').bind(id).first();
-						const emailHtml = `
-							<h1>用户名已修改</h1>
-							<p>您的用户名已被管理员修改为 <strong>${username}</strong>。</p>
-							<p>如有疑问，请联系管理员。</p>
-						`;
-						ctx.waitUntil(sendEmail(user.email, '您的用户名已修改', emailHtml, env).catch(console.error));
+						ctx.waitUntil(sendEmailByTemplate(user.email, 'admin_username_updated', { username }).catch(console.error));
 					}
 				}
 				
@@ -1004,12 +1216,7 @@ export default {
 				const setting = await env.forum_db.prepare("SELECT value FROM settings WHERE key = 'notify_on_manual_verify'").first();
 				if (setting && setting.value === '1') {
 					const user = await env.forum_db.prepare('SELECT email, username FROM users WHERE id = ?').bind(id).first();
-					const emailHtml = `
-						<h1>账户已验证</h1>
-						<p>您的账户（用户名：<strong>${user.username}</strong>）已通过管理员手动验证。</p>
-						<p>您现在可以登录并使用全部功能。</p>
-					`;
-					ctx.waitUntil(sendEmail(user.email as string, '您的账户已通过验证', emailHtml, env).catch(console.error));
+					ctx.waitUntil(sendEmailByTemplate(user.email as string, 'admin_manual_verified', { username: user.username }).catch(console.error));
 				}
 
 				return jsonResponse({ success });
@@ -1037,15 +1244,9 @@ export default {
 				}
 
 				const verifyLink = `${url.origin}/api/verify?token=${token}`;
-				const emailHtml = `
-					<h1>${user.username}，您好！</h1>
-					<p>请点击下方链接验证您的邮箱地址：</p>
-					<a href="${verifyLink}">立即验证邮箱</a>
-					<p>如果这不是您本人操作，请忽略此邮件。</p>
-				`;
 
 				ctx.waitUntil(
-					sendEmail(user.email, '请验证您的邮箱', emailHtml, env)
+					sendEmailByTemplate(user.email, 'admin_resend_verify', { username: user.username, verifyLink })
 						.catch(err => console.error('[Background Email Error]', err))
 				);
 				
@@ -1110,12 +1311,7 @@ export default {
 				if (userToDelete) {
 					const setting = await env.forum_db.prepare("SELECT value FROM settings WHERE key = 'notify_on_user_delete'").first();
 					if (setting && setting.value === '1') {
-						const emailHtml = `
-							<h1>账户已删除</h1>
-							<p>您的账户（用户名：<strong>${userToDelete.username}</strong>）已被管理员删除。</p>
-							<p>如果您认为这是误操作，请尽快联系管理员。</p>
-						`;
-						ctx.waitUntil(sendEmail(userToDelete.email as string, '您的账户已被删除', emailHtml, env).catch(console.error));
+						ctx.waitUntil(sendEmailByTemplate(userToDelete.email as string, 'admin_account_deleted', { username: userToDelete.username }).catch(console.error));
 					}
 				}
 
@@ -1305,6 +1501,59 @@ export default {
 			}
 		}
 
+		if (url.pathname === '/api/admin/email/test' && method === 'POST') {
+			try {
+				const userPayload = await authenticate(request);
+				if (userPayload.role !== 'admin') return jsonResponse({ error: 'Unauthorized' }, 403);
+
+				const body = await request.json() as { to?: string; template?: string; payload?: EmailTemplatePayload };
+				const to = String(body.to || '').trim();
+				const template = String(body.template || '').trim();
+				const payload = body.payload && typeof body.payload === 'object' ? body.payload : {};
+
+				if (!to) return jsonResponse({ error: '缺少收件邮箱' }, 400);
+				if (!isValidEmail(to)) return jsonResponse({ error: '收件邮箱格式无效' }, 400);
+				if (!template) return jsonResponse({ error: '缺少邮件模板' }, 400);
+
+				const isBatch = template === 'all';
+				const templateKeys = isBatch ? EMAIL_TEMPLATE_DEFINITIONS.map((item) => item.key) : [template];
+				const invalidTemplate = templateKeys.find((key) => !EMAIL_TEMPLATE_MAP[key]);
+				if (invalidTemplate) return jsonResponse({ error: '无效的邮件模板' }, 400);
+
+				const results: Array<{ template: string; label: string; success: boolean; error?: string }> = [];
+				for (const templateKey of templateKeys) {
+					const templateDefinition = EMAIL_TEMPLATE_MAP[templateKey];
+					try {
+						const currentPayload = isBatch ? {} : payload;
+						await sendEmailByTemplate(to, templateKey, currentPayload);
+						results.push({ template: templateKey, label: templateDefinition.label, success: true });
+					} catch (error: any) {
+						results.push({
+							template: templateKey,
+							label: templateDefinition.label,
+							success: false,
+							error: String(error?.message || error)
+						});
+					}
+				}
+
+				const failedItems = results.filter((item) => !item.success).map((item) => ({ template: item.template, error: item.error }));
+				await security.logAudit(userPayload.id, 'ADMIN_TEST_EMAIL', 'system', 'email', {
+					to,
+					template,
+					isBatch,
+					failedItems
+				}, request);
+
+				return jsonResponse({
+					success: results.some((item) => item.success),
+					results
+				});
+			} catch (e) {
+				return handleError(e);
+			}
+		}
+
 		// --- END ADMIN ROUTES ---
 
 		// TEST: Email Debug
@@ -1315,7 +1564,7 @@ export default {
 				if (!to) return jsonResponse({ error: '缺少收件人地址' }, 400);
 
 				console.log('[DEBUG] Starting test email to:', to);
-				await sendEmail(to, '测试邮件', '<h1>测试邮件发送成功</h1><p>这是一封用于验证 SMTP 配置的测试邮件。</p>', env);
+				await sendEmailByTemplate(to, 'smtp_test');
 				console.log('[DEBUG] Test email sent successfully');
 				
 				return jsonResponse({ success: true, message: '邮件已发送' });
@@ -1364,16 +1613,9 @@ export default {
 				// Pre-check email deliverability (Send a test email first)
 				// Note: We don't insert user yet. If email fails, we abort.
 				const verifyLink = `${url.origin}/api/verify?token=${verificationToken}`;
-				
-				const emailHtml = `
-					<h1>${username}，欢迎加入论坛！</h1>
-					<p>请点击下方链接验证您的邮箱地址：</p>
-					<a href="${verifyLink}">立即验证邮箱</a>
-					<p>如果这不是您本人操作，请忽略此邮件。</p>
-				`;
 
 				try {
-					await sendEmail(email, '请验证您的邮箱', emailHtml, env);
+					await sendEmailByTemplate(email, 'register_verify', { username, verifyLink });
 				} catch (e) {
 					console.error('[Registration Email Error]', e);
 					return jsonResponse({ error: '验证邮件发送失败，请检查邮箱地址是否正确。' }, 400);
@@ -1779,14 +2021,12 @@ export default {
 
 					// Notify Post Author (if not self)
 					if (post && post.author_id !== userPayload.id && post.email_notifications === 1) {
-						const emailHtml = `
-							<h1>您的帖子有新评论</h1>
-							<p><strong>${commenterName}</strong> 评论了您的帖子“<strong>${post.title}</strong>”：</p>
-							<blockquote>${content}</blockquote>
-							<p><a href="${postUrl}">查看评论</a></p>
-							<p style="font-size:0.8em;color:#666;">您收到这封邮件，是因为您已开启帖子相关邮件提醒。</p>
-						`;
-						ctx.waitUntil(sendEmail(post.email, `您的帖子有新评论：${post.title}`, emailHtml, env).catch(console.error));
+						ctx.waitUntil(sendEmailByTemplate(post.email, 'post_new_comment', {
+							commenterName,
+							postTitle: post.title,
+							commentContent: content,
+							postUrl
+						}).catch(console.error));
 					}
 
 					// 2. Notify Parent Comment Author (if replying to a comment)
@@ -1807,14 +2047,12 @@ export default {
 							if (parentCommentUser && notifyUserId !== userPayload.id && parentCommentUser.email_notifications === 1) {
 								// Avoid double notification if parent author is also post author (already handled above)
 								if (notifyUserId !== post.author_id) {
-									const replyHtml = `
-										<h1>您的评论有新回复</h1>
-										<p><strong>${commenterName}</strong> 回复了您在“<strong>${post.title}</strong>”下的评论：</p>
-										<blockquote>${content}</blockquote>
-										<p><a href="${postUrl}">查看回复</a></p>
-										<p style="font-size:0.8em;color:#666;">您收到这封邮件，是因为您已开启帖子相关邮件提醒。</p>
-									`;
-									ctx.waitUntil(sendEmail(parentCommentUser.email, '您的评论有新回复', replyHtml, env).catch(console.error));
+									ctx.waitUntil(sendEmailByTemplate(parentCommentUser.email, 'comment_new_reply', {
+										commenterName,
+										postTitle: post.title,
+										replyContent: content,
+										postUrl
+									}).catch(console.error));
 								}
 							}
 						}

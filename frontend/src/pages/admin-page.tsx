@@ -8,8 +8,81 @@ import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, D
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Separator } from '@/components/ui/separator';
-import { apiFetch, getSecurityHeaders, type Category } from '@/lib/api';
+import {
+	adminTestEmail,
+	apiFetch,
+	getSecurityHeaders,
+	type AdminEmailTestResult,
+	type Category
+} from '@/lib/api';
 import { getToken, getUser } from '@/lib/auth';
+
+type EmailTemplateField = {
+	key: string;
+	label: string;
+	placeholder: string;
+};
+
+type EmailTemplateOption = {
+	key: string;
+	label: string;
+	fields: EmailTemplateField[];
+};
+
+const EMAIL_TEMPLATE_OPTIONS: EmailTemplateOption[] = [
+	{ key: 'smtp_test', label: 'SMTP 测试邮件', fields: [] },
+	{ key: 'reset_password', label: '密码重置邮件', fields: [{ key: 'resetLink', label: '重置链接', placeholder: 'https://example.com/reset?token=test' }] },
+	{
+		key: 'change_email_confirm',
+		label: '更换邮箱确认邮件',
+		fields: [
+			{ key: 'newEmail', label: '新邮箱', placeholder: 'new-email@example.com' },
+			{ key: 'verifyLink', label: '确认链接', placeholder: 'https://example.com/api/verify-email-change?token=test' }
+		]
+	},
+	{
+		key: 'register_verify',
+		label: '注册验证邮件',
+		fields: [
+			{ key: 'username', label: '用户名', placeholder: '测试用户' },
+			{ key: 'verifyLink', label: '验证链接', placeholder: 'https://example.com/api/verify?token=test' }
+		]
+	},
+	{
+		key: 'admin_resend_verify',
+		label: '后台重发验证邮件',
+		fields: [
+			{ key: 'username', label: '用户名', placeholder: '测试用户' },
+			{ key: 'verifyLink', label: '验证链接', placeholder: 'https://example.com/api/verify?token=test' }
+		]
+	},
+	{ key: 'admin_avatar_updated', label: '后台头像更新通知', fields: [] },
+	{ key: 'admin_username_updated', label: '后台用户名更新通知', fields: [{ key: 'username', label: '用户名', placeholder: '测试用户' }] },
+	{ key: 'admin_manual_verified', label: '后台手动验证通知', fields: [{ key: 'username', label: '用户名', placeholder: '测试用户' }] },
+	{ key: 'admin_account_deleted', label: '后台删号通知', fields: [{ key: 'username', label: '用户名', placeholder: '测试用户' }] },
+	{
+		key: 'post_new_comment',
+		label: '帖子新评论提醒',
+		fields: [
+			{ key: 'commenterName', label: '评论者', placeholder: '测试评论者' },
+			{ key: 'postTitle', label: '帖子标题', placeholder: '示例帖子标题' },
+			{ key: 'commentContent', label: '评论内容', placeholder: '这是一条用于测试的新评论内容。' },
+			{ key: 'postUrl', label: '帖子链接', placeholder: 'https://example.com/post?id=1' }
+		]
+	},
+	{
+		key: 'comment_new_reply',
+		label: '评论新回复提醒',
+		fields: [
+			{ key: 'commenterName', label: '回复者', placeholder: '测试评论者' },
+			{ key: 'postTitle', label: '帖子标题', placeholder: '示例帖子标题' },
+			{ key: 'replyContent', label: '回复内容', placeholder: '这是一条用于测试的新回复内容。' },
+			{ key: 'postUrl', label: '帖子链接', placeholder: 'https://example.com/post?id=1' }
+		]
+	}
+];
+
+const EMAIL_TEMPLATE_MAP = Object.fromEntries(EMAIL_TEMPLATE_OPTIONS.map((item) => [item.key, item]));
 
 export function AdminPage() {
 	const token = getToken();
@@ -42,6 +115,13 @@ export function AdminPage() {
 	const [editUsername, setEditUsername] = React.useState('');
 	const [editAvatarUrl, setEditAvatarUrl] = React.useState('');
 	const [editPassword, setEditPassword] = React.useState('');
+	const [emailTestTo, setEmailTestTo] = React.useState('');
+	const [emailTemplate, setEmailTemplate] = React.useState('smtp_test');
+	const [emailTemplateFields, setEmailTemplateFields] = React.useState<Record<string, string>>({});
+	const [emailTesting, setEmailTesting] = React.useState(false);
+	const [emailTestResults, setEmailTestResults] = React.useState<AdminEmailTestResult[]>([]);
+	const [emailTestError, setEmailTestError] = React.useState('');
+	const [sendAllConfirmOpen, setSendAllConfirmOpen] = React.useState(false);
 
 	React.useEffect(() => {
 		if (!token) window.location.href = '/login';
@@ -50,6 +130,8 @@ export function AdminPage() {
 	React.useEffect(() => {
 		if (token && !isAdmin) setError('无权限访问管理后台');
 	}, [token, isAdmin]);
+
+	const selectedEmailTemplate = EMAIL_TEMPLATE_MAP[emailTemplate] ?? EMAIL_TEMPLATE_OPTIONS[0];
 
 	const refresh = React.useCallback(async () => {
 		if (!isAdmin) return;
@@ -242,6 +324,38 @@ export function AdminPage() {
 		}
 	}
 
+	function updateEmailTemplateField(key: string, value: string) {
+		setEmailTemplateFields((current) => ({ ...current, [key]: value }));
+	}
+
+	async function submitEmailTest(template: string) {
+		if (!isAdmin) return;
+		setEmailTesting(true);
+		setEmailTestError('');
+		try {
+			const response = await adminTestEmail({
+				to: emailTestTo,
+				template,
+				payload: template === 'all' ? undefined : emailTemplateFields
+			});
+			setEmailTestResults(response.results);
+		} catch (e: any) {
+			setEmailTestResults([]);
+			setEmailTestError(String(e?.message || e));
+		} finally {
+			setEmailTesting(false);
+		}
+	}
+
+	async function sendCurrentTemplate() {
+		await submitEmailTest(emailTemplate);
+	}
+
+	async function sendAllTemplates() {
+		setSendAllConfirmOpen(false);
+		await submitEmailTest('all');
+	}
+
 	return (
 		<PageShell>
 			<div className="space-y-6">
@@ -353,6 +467,82 @@ export function AdminPage() {
 								<Button onClick={saveSettings} disabled={loading}>
 									{loading ? '保存中...' : '保存设置'}
 								</Button>
+							</CardContent>
+						</Card>
+
+						<Card>
+							<CardHeader>
+								<CardTitle>发信测试</CardTitle>
+							</CardHeader>
+							<CardContent className="space-y-4">
+								<div className="grid gap-2">
+									<Label htmlFor="email-test-to">收件邮箱</Label>
+									<Input
+										id="email-test-to"
+										type="email"
+										value={emailTestTo}
+										onChange={(e) => setEmailTestTo(e.target.value)}
+										placeholder="name@example.com"
+									/>
+								</div>
+								<div className="grid gap-2">
+									<Label htmlFor="email-template">邮件模板</Label>
+									<select
+										id="email-template"
+										className="h-10 rounded-md border border-input bg-background px-3 py-2 text-sm"
+										value={emailTemplate}
+										onChange={(e) => {
+											setEmailTemplate(e.target.value);
+											setEmailTestResults([]);
+											setEmailTestError('');
+										}}
+									>
+										{EMAIL_TEMPLATE_OPTIONS.map((option) => (
+											<option key={option.key} value={option.key}>
+												{option.label}
+											</option>
+										))}
+									</select>
+								</div>
+								{selectedEmailTemplate.fields.length > 0 ? (
+									<div className="grid gap-4 sm:grid-cols-2">
+										{selectedEmailTemplate.fields.map((field) => (
+											<div key={field.key} className="grid gap-2">
+												<Label htmlFor={`email-field-${field.key}`}>{field.label}</Label>
+												<Input
+													id={`email-field-${field.key}`}
+													value={emailTemplateFields[field.key] ?? ''}
+													onChange={(e) => updateEmailTemplateField(field.key, e.target.value)}
+													placeholder={field.placeholder}
+												/>
+											</div>
+										))}
+									</div>
+								) : (
+									<p className="text-sm text-muted-foreground">当前模板无需额外字段，后端会自动使用默认示例内容。</p>
+								)}
+								<div className="flex flex-wrap gap-2">
+									<Button onClick={sendCurrentTemplate} disabled={loading || emailTesting}>
+										{emailTesting ? '发送中...' : '发送当前模板'}
+									</Button>
+									<Button variant="outline" onClick={() => setSendAllConfirmOpen(true)} disabled={loading || emailTesting}>
+										发送全部模板
+									</Button>
+								</div>
+								{emailTestError ? <div className="rounded-md border border-destructive/50 bg-destructive/5 p-3 text-sm text-destructive">{emailTestError}</div> : null}
+								{emailTestResults.length > 0 ? (
+									<div className="space-y-2 rounded-md border p-3">
+										<div className="text-sm font-medium">发送结果</div>
+										<div className="space-y-2 text-sm">
+											{emailTestResults.map((result) => (
+												<div key={result.template} className="rounded border p-2">
+													<div className="font-medium">{result.label}</div>
+													<div className={result.success ? 'text-emerald-600' : 'text-destructive'}>{result.success ? '发送成功' : `发送失败：${result.error || '未知错误'}`}</div>
+												</div>
+											))}
+										</div>
+									</div>
+								) : null}
 							</CardContent>
 						</Card>
 
@@ -515,6 +705,23 @@ export function AdminPage() {
 								</div>
 							</CardContent>
 						</Card>
+
+						<Dialog open={sendAllConfirmOpen} onOpenChange={setSendAllConfirmOpen}>
+							<DialogContent>
+								<DialogHeader>
+									<DialogTitle>确认发送全部模板</DialogTitle>
+									<DialogDescription>这会向同一收件箱连续发送全部测试邮件模板，请确认目标邮箱可用于批量测试。</DialogDescription>
+								</DialogHeader>
+								<DialogFooter>
+									<Button variant="outline" onClick={() => setSendAllConfirmOpen(false)}>
+										取消
+									</Button>
+									<Button onClick={sendAllTemplates} disabled={emailTesting}>
+										{emailTesting ? '发送中...' : '确认发送'}
+									</Button>
+								</DialogFooter>
+							</DialogContent>
+						</Dialog>
 
 						<Dialog open={editOpen} onOpenChange={setEditOpen}>
 							<DialogContent>
