@@ -667,16 +667,14 @@ export default {
 				await env.forum_db.prepare('UPDATE users SET reset_token = ?, reset_token_expires = ? WHERE id = ?')
 					.bind(token, expires, user.id).run();
 
-				// Base URL logic: Use env var or default to request origin, but override for prod if needed
-				const baseUrl = 'https://i.2x.nz'; // Hardcoded as requested
-				const resetLink = `${baseUrl}/reset?token=${token}`;
+				const resetLink = `${url.origin}/reset?token=${token}`;
 				
 				const emailHtml = `
 					<h1>密码重置请求</h1>
-					<p>请点击下方链接重置您的密码：</p>
-					<a href="${resetLink}">重置密码</a>
-					<p>如果您未请求此操作，请忽略此邮件。</p>
-					<p>此链接将在 1 小时后失效。</p>
+					<p>我们收到了您的密码重置申请，请点击下方链接继续操作：</p>
+					<a href="${resetLink}">立即重置密码</a>
+					<p>如果这不是您本人操作，请忽略此邮件。</p>
+					<p>该链接将在 1 小时后失效。</p>
 				`;
 
 				ctx.waitUntil(sendEmail(email, '密码重置请求', emailHtml, env).catch(console.error));
@@ -780,12 +778,13 @@ export default {
 				
 				await security.logAudit(userPayload.id, 'CHANGE_EMAIL_INIT', 'user', String(user_id), { new_email }, request);
 
-				const baseUrl = 'https://i.2x.nz';
-				const verifyLink = `${baseUrl}/api/verify-email-change?token=${token}`;
+				const verifyLink = `${url.origin}/api/verify-email-change?token=${token}`;
 				const emailHtml = `
 					<h1>确认更换邮箱</h1>
-					<p>请点击下方链接确认将您的邮箱更换为 ${new_email}：</p>
-					<a href="${verifyLink}">确认更换</a>
+					<p>您正在将账户邮箱更换为 <strong>${new_email}</strong>。</p>
+					<p>请点击下方链接完成确认：</p>
+					<a href="${verifyLink}">确认更换邮箱</a>
+					<p>如果这不是您本人操作，请忽略此邮件。</p>
 				`;
 
 				ctx.waitUntil(sendEmail(new_email, '确认更换邮箱', emailHtml, env).catch(console.error));
@@ -807,7 +806,7 @@ export default {
 				await env.forum_db.prepare('UPDATE users SET email = ?, pending_email = NULL, email_change_token = NULL WHERE id = ?')
 					.bind(user.pending_email, user.id).run();
 
-				return Response.redirect(`https://i.2x.nz/?email_changed=true`, 302);
+				return Response.redirect(`${url.origin}/?email_changed=true`, 302);
 			} catch (e) {
 				return new Response('Failed', { status: 500 });
 			}
@@ -851,7 +850,8 @@ export default {
 						const user = await env.forum_db.prepare('SELECT email, username FROM users WHERE id = ?').bind(id).first();
 						const emailHtml = `
 							<h1>头像已更新</h1>
-							<p>您的头像已被管理员更新。</p>
+							<p>管理员已为您更新头像。</p>
+							<p>如果这不是您预期的操作，请及时联系管理员。</p>
 						`;
 						ctx.waitUntil(sendEmail(user.email, '您的头像已更新', emailHtml, env).catch(console.error));
 					}
@@ -1006,8 +1006,8 @@ export default {
 					const user = await env.forum_db.prepare('SELECT email, username FROM users WHERE id = ?').bind(id).first();
 					const emailHtml = `
 						<h1>账户已验证</h1>
-						<p>您的账户 (用户名: <strong>${user.username}</strong>) 已通过管理员手动验证。</p>
-						<p>您现在可以登录并使用所有功能。</p>
+						<p>您的账户（用户名：<strong>${user.username}</strong>）已通过管理员手动验证。</p>
+						<p>您现在可以登录并使用全部功能。</p>
 					`;
 					ctx.waitUntil(sendEmail(user.email as string, '您的账户已通过验证', emailHtml, env).catch(console.error));
 				}
@@ -1036,13 +1036,12 @@ export default {
 					await env.forum_db.prepare('UPDATE users SET verification_token = ? WHERE id = ?').bind(token, id).run();
 				}
 
-				const baseUrl = 'https://i.2x.nz';
-				const verifyLink = `${baseUrl}/api/verify?token=${token}`;
+				const verifyLink = `${url.origin}/api/verify?token=${token}`;
 				const emailHtml = `
-					<h1>欢迎加入论坛，${user.username}！</h1>
+					<h1>${user.username}，您好！</h1>
 					<p>请点击下方链接验证您的邮箱地址：</p>
-					<a href="${verifyLink}">验证邮箱</a>
-					<p>如果您未请求此操作，请忽略此邮件。</p>
+					<a href="${verifyLink}">立即验证邮箱</a>
+					<p>如果这不是您本人操作，请忽略此邮件。</p>
 				`;
 
 				ctx.waitUntil(
@@ -1113,8 +1112,8 @@ export default {
 					if (setting && setting.value === '1') {
 						const emailHtml = `
 							<h1>账户已删除</h1>
-							<p>您的账户 (用户名: <strong>${userToDelete.username}</strong>) 已被管理员删除。</p>
-							<p>如果您认为这是误操作，请联系管理员。</p>
+							<p>您的账户（用户名：<strong>${userToDelete.username}</strong>）已被管理员删除。</p>
+							<p>如果您认为这是误操作，请尽快联系管理员。</p>
 						`;
 						ctx.waitUntil(sendEmail(userToDelete.email as string, '您的账户已被删除', emailHtml, env).catch(console.error));
 					}
@@ -1316,7 +1315,7 @@ export default {
 				if (!to) return jsonResponse({ error: '缺少收件人地址' }, 400);
 
 				console.log('[DEBUG] Starting test email to:', to);
-				await sendEmail(to, '测试邮件', '<h1>你好</h1><p>这是一封测试邮件。</p>', env);
+				await sendEmail(to, '测试邮件', '<h1>测试邮件发送成功</h1><p>这是一封用于验证 SMTP 配置的测试邮件。</p>', env);
 				console.log('[DEBUG] Test email sent successfully');
 				
 				return jsonResponse({ success: true, message: '邮件已发送' });
@@ -1364,14 +1363,13 @@ export default {
 
 				// Pre-check email deliverability (Send a test email first)
 				// Note: We don't insert user yet. If email fails, we abort.
-				const baseUrl = 'https://i.2x.nz';
-				const verifyLink = `${baseUrl}/api/verify?token=${verificationToken}`;
+				const verifyLink = `${url.origin}/api/verify?token=${verificationToken}`;
 				
 				const emailHtml = `
-					<h1>欢迎加入论坛，${username}！</h1>
+					<h1>${username}，欢迎加入论坛！</h1>
 					<p>请点击下方链接验证您的邮箱地址：</p>
-					<a href="${verifyLink}">验证邮箱</a>
-					<p>如果您未请求此操作，请忽略此邮件。</p>
+					<a href="${verifyLink}">立即验证邮箱</a>
+					<p>如果这不是您本人操作，请忽略此邮件。</p>
 				`;
 
 				try {
@@ -1423,7 +1421,7 @@ export default {
 
 				if (success) {
 					// Redirect to home page with verified param
-					return Response.redirect(`https://i.2x.nz/?verified=true`, 302);
+					return Response.redirect(`${url.origin}/?verified=true`, 302);
 				} else {
 					return new Response('token 无效或已过期', { status: 400 });
 				}
@@ -1777,18 +1775,18 @@ export default {
 					// Fetch commenter name
 					const commenter = await env.forum_db.prepare('SELECT username FROM users WHERE id = ?').bind(userPayload.id).first();
 					const commenterName = commenter.username;
-					const postUrl = `https://i.2x.nz/posts/${postId}`;
+					const postUrl = `${url.origin}/post?id=${postId}`;
 
 					// Notify Post Author (if not self)
 					if (post && post.author_id !== userPayload.id && post.email_notifications === 1) {
 						const emailHtml = `
-							<h1>New Comment on your post</h1>
-							<p><strong>${commenterName}</strong> commented on your post "<strong>${post.title}</strong>":</p>
+							<h1>您的帖子有新评论</h1>
+							<p><strong>${commenterName}</strong> 评论了您的帖子“<strong>${post.title}</strong>”：</p>
 							<blockquote>${content}</blockquote>
-							<p><a href="${postUrl}">View Comment</a></p>
-							<p style="font-size:0.8em;color:#666;">You received this email because you are subscribed to notifications.</p>
+							<p><a href="${postUrl}">查看评论</a></p>
+							<p style="font-size:0.8em;color:#666;">您收到这封邮件，是因为您已开启帖子相关邮件提醒。</p>
 						`;
-						ctx.waitUntil(sendEmail(post.email, `New comment on: ${post.title}`, emailHtml, env).catch(console.error));
+						ctx.waitUntil(sendEmail(post.email, `您的帖子有新评论：${post.title}`, emailHtml, env).catch(console.error));
 					}
 
 					// 2. Notify Parent Comment Author (if replying to a comment)
@@ -1810,13 +1808,13 @@ export default {
 								// Avoid double notification if parent author is also post author (already handled above)
 								if (notifyUserId !== post.author_id) {
 									const replyHtml = `
-										<h1>New Reply to your comment</h1>
-										<p><strong>${commenterName}</strong> replied to your comment on "<strong>${post.title}</strong>":</p>
+										<h1>您的评论有新回复</h1>
+										<p><strong>${commenterName}</strong> 回复了您在“<strong>${post.title}</strong>”下的评论：</p>
 										<blockquote>${content}</blockquote>
-										<p><a href="${postUrl}">View Reply</a></p>
-										<p style="font-size:0.8em;color:#666;">You received this email because you are subscribed to notifications.</p>
+										<p><a href="${postUrl}">查看回复</a></p>
+										<p style="font-size:0.8em;color:#666;">您收到这封邮件，是因为您已开启帖子相关邮件提醒。</p>
 									`;
-									ctx.waitUntil(sendEmail(parentCommentUser.email, `New reply to your comment`, replyHtml, env).catch(console.error));
+									ctx.waitUntil(sendEmail(parentCommentUser.email, '您的评论有新回复', replyHtml, env).catch(console.error));
 								}
 							}
 						}
