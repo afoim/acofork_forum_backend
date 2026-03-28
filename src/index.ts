@@ -1593,6 +1593,17 @@ export default {
 					}
 				}
 
+				// Comments images
+				const comments = await env.forum_db.prepare('SELECT content FROM comments').all();
+				for (const c of comments.results) {
+					const urls = extractImageUrls(c.content as string);
+					for (const uUrl of urls) {
+						if (uUrl && uUrl.startsWith(endpoint)) {
+							usedKeys.add(uUrl.substring(endpoint.length + 1));
+						}
+					}
+				}
+
 				// 3. Find orphans
 				const orphans = allKeys.filter(key => !usedKeys.has(key));
 
