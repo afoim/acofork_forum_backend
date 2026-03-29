@@ -2060,6 +2060,97 @@ export default {
 			}
 		}
 
+		// GET /api/users/:id
+		if (url.pathname.match(/^\/api\/users\/\d+$/) && method === 'GET') {
+			const userId = url.pathname.split('/')[3];
+			try {
+				const user = await env.forum_db.prepare(
+					`SELECT
+						users.id,
+						users.username,
+						users.avatar_url,
+						users.role,
+						users.created_at,
+						user_profiles.gender,
+						user_profiles.bio,
+						user_profiles.age,
+						user_profiles.region
+					 FROM users
+					 LEFT JOIN user_profiles ON user_profiles.user_id = users.id
+					 WHERE users.id = ?`
+				).bind(userId).first();
+				if (!user) return jsonResponse({ error: 'User not found' }, 404);
+
+				return jsonResponse({
+					id: user.id,
+					username: user.username,
+					avatar_url: user.avatar_url ?? null,
+					role: user.role || 'user',
+					gender: user.gender ?? null,
+					bio: user.bio ?? null,
+					age: user.age ?? null,
+					region: user.region ?? null,
+					created_at: user.created_at
+				});
+			} catch (e) {
+				return handleError(e);
+			}
+		}
+
+		// GET /api/users/:id/posts
+		if (url.pathname.match(/^\/api\/users\/\d+\/posts$/) && method === 'GET') {
+			const userId = url.pathname.split('/')[3];
+			try {
+				const user = await env.forum_db.prepare('SELECT id FROM users WHERE id = ?').bind(userId).first();
+				if (!user) return jsonResponse({ error: 'User not found' }, 404);
+
+				const limit = parseInt(url.searchParams.get('limit') || '20');
+				const offset = parseInt(url.searchParams.get('offset') || '0');
+				const sortByRaw = (url.searchParams.get('sort_by') || 'time').trim().toLowerCase();
+				const sortDirRaw = (url.searchParams.get('sort_dir') || 'desc').trim().toLowerCase();
+				const sortDir = sortDirRaw === 'asc' ? 'ASC' : 'DESC';
+
+				let query = `SELECT
+						posts.*,
+						users.username as author_name,
+						users.avatar_url as author_avatar,
+						users.role as author_role,
+						categories.name as category_name,
+						(SELECT COUNT(*) FROM likes WHERE likes.post_id = posts.id) as like_count,
+						(SELECT COUNT(*) FROM comments WHERE comments.post_id = posts.id) as comment_count
+					 FROM posts
+					 JOIN users ON posts.author_id = users.id
+					 LEFT JOIN categories ON posts.category_id = categories.id
+					 WHERE posts.author_id = ?`;
+				const countQuery = 'SELECT COUNT(*) as total FROM posts WHERE author_id = ?';
+				const params: any[] = [userId];
+
+				const sortExpr =
+					sortByRaw === 'likes'
+						? `like_count ${sortDir}`
+						: sortByRaw === 'comments'
+							? `comment_count ${sortDir}`
+							: sortByRaw === 'views'
+								? `posts.view_count ${sortDir}`
+								: `posts.created_at ${sortDir}`;
+
+				query += ` ORDER BY posts.is_pinned DESC, ${sortExpr}, posts.created_at DESC LIMIT ? OFFSET ?`;
+				params.push(limit, offset);
+
+				const [postsResult, countResult] = await Promise.all([
+					env.forum_db.prepare(query).bind(...params).all(),
+					env.forum_db.prepare(countQuery).bind(userId).first()
+				]);
+
+				return jsonResponse({
+					posts: postsResult.results,
+					total: countResult ? countResult.total : 0
+				});
+			} catch (e) {
+				return handleError(e);
+			}
+		}
+
 		// GET /api/user/likes (Get all post IDs liked by user)
 		if (url.pathname === '/api/user/likes' && method === 'GET') {
 			try {
