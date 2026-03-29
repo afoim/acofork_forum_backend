@@ -620,6 +620,26 @@ export default {
 			}
 		}
 
+		// GET /api/user/me
+		if (url.pathname === '/api/user/me' && method === 'GET') {
+			try {
+				const userPayload = await authenticate(request);
+				const user = await env.forum_db.prepare('SELECT * FROM users WHERE id = ?').bind(userPayload.id).first();
+				if (!user) return jsonResponse({ error: 'User not found' }, 404);
+				return jsonResponse({
+					id: user.id,
+					email: user.email,
+					username: user.username,
+					avatar_url: user.avatar_url,
+					role: user.role || 'user',
+					totp_enabled: !!user.totp_enabled,
+					email_notifications: user.email_notifications === 1
+				});
+			} catch (e) {
+				return handleError(e);
+			}
+		}
+
 		// GET /api/user/avatar
 		if (url.pathname === '/api/user/avatar' && method === 'GET') {
 			try {

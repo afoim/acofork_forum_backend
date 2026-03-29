@@ -1,4 +1,4 @@
-import { getToken, logout } from '@/lib/auth';
+import { getToken, logout, type User } from '@/lib/auth';
 
 export type ForumConfig = {
 	turnstile_enabled: boolean;
@@ -115,6 +115,12 @@ export async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> 
 
 export async function checkSession(): Promise<SessionInfo> {
 	return apiFetch<SessionInfo>('/session', {
+		headers: getSecurityHeaders('GET')
+	});
+}
+
+export async function getCurrentUser(): Promise<User> {
+	return apiFetch<User>('/user/me', {
 		headers: getSecurityHeaders('GET')
 	});
 }
