@@ -1821,8 +1821,7 @@ export default {
 				).bind(token).run();
 
 				if (success) {
-					// Redirect to home page with verified param
-					return redirectResponse(`${url.origin}/?verified=true`);
+					return redirectResponse('https://2x.nz/forum/auth/login/');
 				} else {
 					return textResponse('token 无效或已过期', 400);
 				}
