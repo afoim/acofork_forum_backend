@@ -541,26 +541,29 @@ export default {
             return payload;
         };
 
-        // --- SECURITY CHECK (Replay + Headers) ---
-        // Skip for public GET, Login, Register, Verify, Forgot/Reset Password, Config
-        const publicPaths = [
-            '/api/config', '/api/login', '/api/register', '/api/verify', 
-            '/api/auth/forgot-password', '/api/auth/reset-password', '/api/verify-email-change',
-             // Static/Public GETs
-            '/api/posts', '/api/categories', '/api/users' 
-        ];
-        
-        // Relax check for public GETs that don't need nonce
-        const isPublicGet = method === 'GET' && (
-            publicPaths.includes(url.pathname) || 
-            url.pathname.match(/^\/api\/posts\/\d+$/) || 
-            url.pathname.match(/^\/api\/posts\/\d+\/comments$/)
-        );
+// --- SECURITY CHECK (Replay + Headers) ---
+		// Skip for public GET, Login, Register, Verify, Forgot/Reset Password, Config
+		const publicPaths = [
+			'/api/config', '/api/login', '/api/register', '/api/verify', 
+			'/api/auth/forgot-password', '/api/auth/reset-password', '/api/verify-email-change',
+			 // Static/Public GETs
+			'/api/posts', '/api/categories', '/api/users',
+			 // Webhook endpoints (validated by secret)
+			'/api/webhook/posts'
+		];
+		
+		// Relax check for public GETs that don't need nonce
+		const isPublicGet = method === 'GET' && (
+			publicPaths.includes(url.pathname) || 
+			url.pathname.match(/^\/api\/posts\/\d+$/) || 
+			url.pathname.match(/^\/api\/posts\/\d+\/comments$/)
+		);
 
-        // However, user specifically asked for "Replay protection for sensitive operations".
-        // We will apply strict checks for mutation methods (POST, PUT, DELETE)
-        if (['POST', 'PUT', 'DELETE'].includes(method)) {
-             const validation = await security.validateRequest(request);
+		// However, user specifically asked for "Replay protection for sensitive operations".
+		// We will apply strict checks for mutation methods (POST, PUT, DELETE)
+		// Skip for webhook endpoints (they have their own secret validation)
+		if (['POST', 'PUT', 'DELETE'].includes(method) && url.pathname !== '/api/webhook/posts') {
+			 const validation = await security.validateRequest(request);
              if (!validation.valid) {
                  return jsonResponse({ error: validation.error || 'Security check failed' }, 400);
              }
@@ -2841,38 +2844,13 @@ export default {
 			try {
 				const WEBHOOK_SECRET = env.BLOG_WEBHOOK_SECRET || 'hfp9yf934oufhgp439gh478o3ghriwue4';
 
-				const rawBody = await request.clone().arrayBuffer();
-				const rawBodyStr = new TextDecoder().decode(rawBody);
-				
-				// Verify signature
-				const receivedSignature = request.headers.get('X-Webhook-Signature') || '';
-				const expectedSignature = Array.from(
-					new Uint8Array(
-						await crypto.subtle.sign(
-							'HMAC',
-							await crypto.subtle.importKey(
-								'raw',
-								new TextEncoder().encode(WEBHOOK_SECRET),
-								{ name: 'HMAC', hash: 'SHA-256' },
-								false,
-								['sign']
-							),
-							new TextEncoder().encode(rawBodyStr)
-						)
-					)
-				).map(b => b.toString(16).padStart(2, '0')).join('');
-
-				if (receivedSignature !== expectedSignature) {
-					return jsonResponse({ error: 'Invalid signature' }, 401);
-				}
-
-				// Optional: verify secret header
+				// Verify secret header
 				const receivedSecret = request.headers.get('X-Webhook-Secret') || '';
-				if (receivedSecret && receivedSecret !== WEBHOOK_SECRET) {
+				if (receivedSecret !== WEBHOOK_SECRET) {
 					return jsonResponse({ error: 'Invalid secret' }, 401);
 				}
 
-				const body = JSON.parse(rawBodyStr);
+				const body = await request.json() as any;
 
 				// Validate source
 				if (body.source !== 'blog-post-plugin') {
@@ -2885,7 +2863,7 @@ export default {
 				// Build email content
 				const articleLinks = postUrls.length > 0
 					? postUrls.map(url => `<a href="${escapeHtml(url)}">${escapeHtml(url)}</a>`).join('<br>')
-					: '<a href="https://2x.nz/blog">查看博客</a>';
+					: '<a href="https://2x.nz">查看博客</a>';
 
 				const summary = summaries.length > 0 ? summaries.join('；') : '博客更新';
 
