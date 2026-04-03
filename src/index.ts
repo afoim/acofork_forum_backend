@@ -951,7 +951,7 @@ export default {
 					if (isVisuallyEmpty(username)) return jsonResponse({ error: 'Username cannot be empty' }, 400);
 					if (hasInvisibleCharacters(username)) return jsonResponse({ error: 'Username contains invalid invisible characters' }, 400);
 					if (hasControlCharacters(username)) return jsonResponse({ error: 'Username contains invalid control characters' }, 400);
-					if (hasRestrictedKeywords(username)) return jsonResponse({ error: 'Username contains restricted keywords' }, 400);
+					if (hasRestrictedKeywords(username) && userPayload.role !== 'admin') return jsonResponse({ error: 'Username contains restricted keywords' }, 400);
 
 					// Check Uniqueness
 					const existingUser = await env.forum_db.prepare('SELECT id FROM users WHERE username = ? AND id != ?').bind(username, user_id).first();
@@ -2836,125 +2836,76 @@ export default {
 			}
 		}
 
-		// POST /api/webhook/github (GitHub Webhook for article notifications)
-		if (url.pathname === '/api/webhook/github' && method === 'POST') {
+		// POST /api/webhook/posts (Blog post notification from blog-post plugin)
+		if (url.pathname === '/api/webhook/posts' && method === 'POST') {
 			try {
-				// Delay in seconds before sending notifications (for build time)
-				const NOTIFICATION_DELAY_SECONDS = parseInt(env.ARTICLE_NOTIFICATION_DELAY || '180', 10); // Default 3 minutes
+				const WEBHOOK_SECRET = env.BLOG_WEBHOOK_SECRET || 'hfp9yf934oufhgp439gh478o3ghriwue4';
 
-				// Verify GitHub signature
-				const signature = request.headers.get('X-Hub-Signature-256');
-				const secret = env.GITHUB_WEBHOOK_SECRET;
+				const rawBody = await request.clone().arrayBuffer();
+				const rawBodyStr = new TextDecoder().decode(rawBody);
 				
-				if (secret && signature) {
-					const body = await request.clone().arrayBuffer();
-					const key = await crypto.subtle.importKey(
-						'raw',
-						new TextEncoder().encode(secret),
-						{ name: 'HMAC', hash: 'SHA-256' },
-						false,
-						['sign']
-					);
-					const sigBuffer = await crypto.subtle.sign('HMAC', key, body);
-					const expected = 'sha256=' + Array.from(new Uint8Array(sigBuffer))
-						.map(b => b.toString(16).padStart(2, '0'))
-						.join('');
-					
-					if (signature !== expected) {
-						return jsonResponse({ error: 'Invalid signature' }, 401);
-					}
+				// Verify signature
+				const receivedSignature = request.headers.get('X-Webhook-Signature') || '';
+				const expectedSignature = Array.from(
+					new Uint8Array(
+						await crypto.subtle.sign(
+							'HMAC',
+							await crypto.subtle.importKey(
+								'raw',
+								new TextEncoder().encode(WEBHOOK_SECRET),
+								{ name: 'HMAC', hash: 'SHA-256' },
+								false,
+								['sign']
+							),
+							new TextEncoder().encode(rawBodyStr)
+						)
+					)
+				).map(b => b.toString(16).padStart(2, '0')).join('');
+
+				if (receivedSignature !== expectedSignature) {
+					return jsonResponse({ error: 'Invalid signature' }, 401);
 				}
 
-				const body = await request.json() as any;
-
-				// Handle GitHub Ping event
-				if (body.zen) {
-					return jsonResponse({ status: 'ok', message: 'pong' });
+				// Optional: verify secret header
+				const receivedSecret = request.headers.get('X-Webhook-Secret') || '';
+				if (receivedSecret && receivedSecret !== WEBHOOK_SECRET) {
+					return jsonResponse({ error: 'Invalid secret' }, 401);
 				}
 
-				// Process push events
-				if (body.ref && body.commits) {
-					const commits = body.commits as Array<{
-						message: string;
-						added?: string[];
-						modified?: string[];
-						removed?: string[];
-						url: string;
-					}>;
+				const body = JSON.parse(rawBodyStr);
 
-					// Filter commits starting with 'posts:' or 'update:'
-					const postsCommits = commits.filter(c =>
-						c.message.toLowerCase().startsWith('posts:')
-					);
-					const updateCommits = commits.filter(c =>
-						c.message.toLowerCase().startsWith('update:')
-					);
+				// Validate source
+				if (body.source !== 'blog-post-plugin') {
+					return jsonResponse({ error: 'Invalid source' }, 400);
+				}
 
-					const messages: Array<{ summary: string; articleLinks: string }> = [];
+				const postUrls = body.post_urls as string[];
+				const summaries = body.summaries as string[];
 
-					// Process posts: commits (include article links)
-					for (const commit of postsCommits) {
-						const summary = commit.message.replace(/^posts:\s*/i, '').trim();
-						const articleUrls: string[] = [];
+				// Build email content
+				const articleLinks = postUrls.length > 0
+					? postUrls.map(url => `<a href="${escapeHtml(url)}">${escapeHtml(url)}</a>`).join('<br>')
+					: '<a href="https://2x.nz/blog">查看博客</a>';
 
-						const files = [...(commit.added || []), ...(commit.modified || [])];
-						for (const file of files) {
-							if (file.startsWith('src/content/posts/')) {
-								const filename = file.replace('src/content/posts/', '').replace('.md', '');
-								articleUrls.push(`<a href="https://2x.nz/blog/${encodeURIComponent(filename)}">${escapeHtml(filename)}</a>`);
-							}
-						}
+				const summary = summaries.length > 0 ? summaries.join('；') : '博客更新';
 
-						if (articleUrls.length > 0 || summary) {
-							messages.push({
-								summary: summary || '文章更新',
-								articleLinks: articleUrls.length > 0 ? articleUrls.join('<br>') : '<a href="https://2x.nz/blog">查看博客</a>'
-							});
-						}
-					}
+				// Send emails immediately
+				const users = await env.forum_db.prepare(
+					'SELECT email FROM users WHERE verified = 1 AND article_notifications = 1'
+				).all<{ email: string }>();
 
-					// Process update: commits (summary only)
-					for (const commit of updateCommits) {
-						const summary = commit.message.replace(/^update:\s*/i, '').trim();
-						if (summary) {
-							messages.push({
+				if (users.results && users.results.length > 0) {
+					for (const user of users.results) {
+						ctx.waitUntil(
+							sendEmailByTemplate(user.email, 'article_update', {
 								summary,
-								articleLinks: '<a href="https://2x.nz/blog">查看博客</a>'
-							});
-						}
-					}
-
-					// Send emails with delay (for site build)
-					if (messages.length > 0) {
-						const sendNotifications = async () => {
-							// Wait for build to complete
-							await new Promise(resolve => setTimeout(resolve, NOTIFICATION_DELAY_SECONDS * 1000));
-							
-							const users = await env.forum_db.prepare(
-								'SELECT email FROM users WHERE verified = 1 AND article_notifications = 1'
-							).all<{ email: string }>();
-
-							if (users.results && users.results.length > 0) {
-								for (const msg of messages) {
-									for (const user of users.results) {
-										try {
-											await sendEmailByTemplate(user.email, 'article_update', {
-												summary: msg.summary,
-												articleLinks: msg.articleLinks
-											});
-										} catch (e) {
-											console.error(`Failed to send email to ${user.email}:`, e);
-										}
-									}
-								}
-							}
-						};
-						
-						ctx.waitUntil(sendNotifications());
+								articleLinks
+							}).catch(e => console.error(`Failed to send email to ${user.email}:`, e))
+						);
 					}
 				}
 
-				return jsonResponse({ status: 'ok', delay: NOTIFICATION_DELAY_SECONDS });
+				return jsonResponse({ status: 'ok', received: postUrls.length, sent: users.results?.length || 0 });
 			} catch (e) {
 				return handleError(e);
 			}
