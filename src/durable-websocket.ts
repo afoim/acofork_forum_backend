@@ -82,10 +82,6 @@ export class ForumWebSocket {
 						payload: { success: true }
 					}));
 					break;
-
-				case 'ping':
-					ws.send(JSON.stringify({ type: 'pong' }));
-					break;
 			}
 		} catch (e) {
 			console.error('WebSocket message parse error:', e);
