@@ -528,8 +528,30 @@ export default {
 			return pageTitle ? `${pageTitle} - ${siteName}` : siteName;
 		};
 		const sendEmailByTemplate = async (to: string, templateKey: string, payload: EmailTemplatePayload = {}) => {
+			const domain = to.split('@')[1];
+			if (!domain) throw new Error('Invalid email address');
+
+			const hasMX = await checkMXRecord(domain);
+			if (!hasMX) {
+				throw new Error(`No MX record found for domain: ${domain}`);
+			}
+
 			const { message } = buildEmailTemplate(templateKey, url.origin, payload);
 			await sendEmail(to, message.subject, message.html, env);
+		};
+
+		const checkMXRecord = async (domain: string): Promise<boolean> => {
+			try {
+				const dohUrl = `https://cloudflare-dns.com/dns-query?type=MX&name=${encodeURIComponent(domain)}`;
+				const response = await fetch(dohUrl, {
+					headers: { 'accept': 'application/dns-json' }
+				});
+				if (!response.ok) return false;
+				const data = await response.json() as any;
+				return Array.isArray(data.Answer) && data.Answer.some((r: any) => r.type === 15);
+			} catch {
+				return false;
+			}
 		};
 
 		// Helper to handle errors
