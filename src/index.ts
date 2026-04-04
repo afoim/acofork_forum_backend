@@ -4,7 +4,7 @@ import { generateIdenticon } from './identicon';
 import { uploadImage, deleteImage, listAllKeys, getPublicUrl, S3Env } from './s3';
 import * as OTPAuth from 'otpauth';
 import { Security, UserPayload } from './security';
-export { ForumWebSocket } from './durable-websocket';
+export { SSEHub, handleSSEConnection } from './sse-hub';
 
 // Utility to extract image URLs from Markdown content
 function extractImageUrls(content: string): string[] {
@@ -404,17 +404,17 @@ export default {
 			});
 		}
 
-		// WebSocket upgrade endpoint - 使用 Durable Object
-		if (url.pathname === '/api/ws') {
-			const postId = url.searchParams.get('postId') || 'global';
-			const id = env.WS_MANAGER.idFromName(postId);
-			const stub = env.WS_MANAGER.get(id);
-			return stub.fetch(request);
+		// SSE endpoint - using Durable Object with Hibernation WebSocket
+		if (url.pathname === '/api/sse') {
+			const postId = url.searchParams.get('postId') || undefined;
+			const { handleSSEConnection } = await import('./sse-hub');
+			return handleSSEConnection(request, env, postId);
 		}
 
-		// WebSocket status endpoint (for debugging)
-		if (url.pathname === '/api/ws/status' && method === 'GET') {
-			const id = env.WS_MANAGER.idFromName('global');
+		// SSE status endpoint (for debugging)
+		if (url.pathname === '/api/sse/status' && method === 'GET') {
+			const postId = url.searchParams.get('postId') || 'global';
+			const id = env.WS_MANAGER.idFromName(postId);
 			const stub = env.WS_MANAGER.get(id);
 			const resp = await stub.fetch(new Request('http://internal/status'));
 			const data = await resp.json();

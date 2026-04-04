@@ -22,14 +22,14 @@
 		"bindings": [
 			{
 				"name": "WS_MANAGER",
-				"class_name": "ForumWebSocket"
+				"class_name": "SSEHub"
 			}
 		]
 	},
 	"migrations": [
 		{
 			"tag": "v1",
-			"new_sqlite_classes": ["ForumWebSocket"]
+			"new_sqlite_classes": ["SSEHub"]
 		}
 	]
 }
