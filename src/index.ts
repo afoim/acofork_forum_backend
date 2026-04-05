@@ -573,6 +573,11 @@ export default {
             const token = authHeader.split(' ')[1];
             const payload = await security.verifyToken(token);
             if (!payload) throw new Error('Invalid Token');
+            // Update last_seen_at (non-blocking, fire-and-forget)
+            ctx.waitUntil(
+                env.forum_db.prepare('UPDATE users SET last_seen_at = CURRENT_TIMESTAMP WHERE id = ?')
+                    .bind(payload.id).run().catch(() => {})
+            );
             return payload;
         };
 
@@ -773,7 +778,8 @@ export default {
 					gender: user.gender ?? null,
 					bio: user.bio ?? null,
 					age: user.age ?? null,
-					region: user.region ?? null
+					region: user.region ?? null,
+					last_seen_at: user.last_seen_at ?? null
 				});
 			} catch (e) {
 				return handleError(e);
@@ -1667,7 +1673,7 @@ export default {
 				if (userPayload.role !== 'admin') return jsonResponse({ error: 'Unauthorized' }, 403);
 
 				const q = (url.searchParams.get('q') || url.searchParams.get('query') || '').trim();
-				let query = 'SELECT id, email, username, role, verified, created_at, avatar_url FROM users';
+				let query = 'SELECT id, email, username, role, verified, created_at, avatar_url, last_seen_at FROM users';
 				const params: any[] = [];
 				const conditions: string[] = [];
 
@@ -2209,6 +2215,7 @@ export default {
 						users.avatar_url,
 						users.role,
 						users.created_at,
+						users.last_seen_at,
 						user_profiles.gender,
 						user_profiles.bio,
 						user_profiles.age,
@@ -2228,7 +2235,8 @@ export default {
 					bio: user.bio ?? null,
 					age: user.age ?? null,
 					region: user.region ?? null,
-					created_at: user.created_at
+					created_at: user.created_at,
+					last_seen_at: user.last_seen_at ?? null
 				});
 			} catch (e) {
 				return handleError(e);

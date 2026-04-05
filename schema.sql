@@ -26,6 +26,7 @@ CREATE TABLE users (
   nickname TEXT,
   email_notifications INTEGER DEFAULT 1,
   article_notifications INTEGER DEFAULT 0,
+  last_seen_at TIMESTAMP,
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
