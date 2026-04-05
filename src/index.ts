@@ -67,8 +67,9 @@ function hasInvisibleCharacters(str: string): boolean {
 
 // Utility to check restricted username keywords
 function hasRestrictedKeywords(username: string): boolean {
-	const restricted = ['管理', 'admin', 'sudo', 'acofork', 'aco fork', '二叉树树', '胡丁','huding'];
-	return restricted.some(keyword => username.toLowerCase().includes(keyword.toLowerCase()));
+	const restricted = ['管理', 'admin', 'sudo', 'acofork', '二叉树树', '胡丁','huding'];
+	const normalized = username.toLowerCase().replace(/\s+/g, '');
+	return restricted.some(keyword => normalized.includes(keyword.toLowerCase()));
 }
 
 function normalizeOptionalProfileText(value: unknown, maxLength: number, fieldName: string): string | null {
