@@ -2309,6 +2309,26 @@ export default {
 			}
 		}
 
+		// GET /api/posts/new-count (Count new posts since user's last visit)
+		if (url.pathname === '/api/posts/new-count' && method === 'GET') {
+			try {
+				const userPayload = await authenticate(request);
+				// Read last_seen_at first — authenticate's ctx.waitUntil UPDATE is async,
+				// so this SELECT will almost certainly read the OLD value.
+				const user = await env.forum_db.prepare('SELECT last_seen_at FROM users WHERE id = ?').bind(userPayload.id).first();
+				const lastSeenAt = user?.last_seen_at as string | null;
+				if (!lastSeenAt) {
+					// User has never been seen before (first login), return total post count
+					const total = await env.forum_db.prepare('SELECT COUNT(*) as count FROM posts').first('count');
+					return jsonResponse({ new_post_count: total || 0, last_seen_at: null });
+				}
+				const count = await env.forum_db.prepare('SELECT COUNT(*) as count FROM posts WHERE created_at > ?').bind(lastSeenAt).first('count');
+				return jsonResponse({ new_post_count: count || 0, last_seen_at: lastSeenAt });
+			} catch (e) {
+				return handleError(e);
+			}
+		}
+
 		// GET /posts
 		if (url.pathname === '/api/posts' && method === 'GET') {
 			try {

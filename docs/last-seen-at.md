@@ -100,13 +100,53 @@
 - 更新操作通过 `ctx.waitUntil()` 异步执行，**不会阻塞 API 响应**
 - 如果更新失败（如数据库短暂不可用），错误会被静默忽略，不影响正常业务
 
+---
+
+### 4. `GET /api/posts/new-count` — 获取上次上线以来的新帖数
+
+**认证**: 需要 `Authorization: Bearer <token>`
+
+**说明**: 该接口先读取用户的 `last_seen_at`（即上次活跃时间），然后统计在此之后发布的新帖数量。由于 `authenticate` 中间件通过 `ctx.waitUntil()` 异步更新 `last_seen_at`，该接口读取到的是**上一次**的活跃时间，而非当前请求时间。
+
+**响应示例**:
+
+```json
+{
+  "new_post_count": 5,
+  "last_seen_at": "2026-04-05T06:30:00.000Z"
+}
+```
+
+**字段说明**:
+
+| 字段 | 类型 | 说明 |
+|---|---|---|
+| `new_post_count` | `number` | 上次上线以来新发布的帖子数量 |
+| `last_seen_at` | `string \| null` | 用户上次活跃时间。为 `null` 时表示首次登录，此时 `new_post_count` 返回帖子总数 |
+
+**前端使用示例**:
+
+```js
+const res = await fetch('/api/posts/new-count', {
+  headers: { 'Authorization': `Bearer ${token}` }
+});
+const { new_post_count, last_seen_at } = await res.json();
+if (new_post_count > 0) {
+  showBadge(`距上次上线已发布 ${new_post_count} 篇新帖`);
+}
+```
+
+---
+
 ## 前端使用建议
 
 1. **用户资料页**: 在 `GET /api/users/:id` 返回中读取 `last_seen_at` 字段，展示为"最后上线: X分钟前"
 2. **管理后台**: 在用户列表中显示每个用户的最后活跃时间
-3. **空值处理**: 当 `last_seen_at` 为 `null` 时，表示该用户从未使用过需要认证的功能（新注册但未操作），可显示为"从未上线"
+3. **新帖提醒**: 调用 `GET /api/posts/new-count` 获取离线期间的新帖数，展示为"距上次上线已发布 X 篇新帖"
+4. **空值处理**: 当 `last_seen_at` 为 `null` 时，表示该用户从未使用过需要认证的功能（新注册但未操作），可显示为"从未上线"
 
 ## 时区说明
 
 - `last_seen_at` 存储的是 SQLite 的 `CURRENT_TIMESTAMP`，即 **UTC 时间**
 - 前端需要自行转换为用户的本地时区进行展示
+
