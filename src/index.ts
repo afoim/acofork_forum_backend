@@ -1,7 +1,7 @@
 
 import { sendEmail } from './smtp';
 import { generateIdenticon } from './identicon';
-import { uploadImage, deleteImage, listAllKeys, getPublicUrl, S3Env } from './s3';
+import { uploadImage, deleteImage, listAllKeys, getPublicUrl, extractImageKey, S3Env } from './s3';
 import * as OTPAuth from 'otpauth';
 import { Security, UserPayload } from './security';
 export { SSEHub, handleSSEConnection } from './sse-hub';
@@ -16,6 +16,71 @@ function extractImageUrls(content: string): string[] {
 		urls.push(match[1]);
 	}
 	return urls;
+}
+
+function extractManagedImageKey(value: string, env: S3Env): string | null {
+	return extractImageKey(env, value);
+}
+
+function rewriteMarkdownImageRefs(content: string, transform: (value: string) => string | null): string {
+	if (!content) return content;
+	return content.replace(/(!\[.*?\]\()(.*?)(\))/g, (_match, prefix, rawValue, suffix) => {
+		const nextValue = transform(rawValue.trim());
+		return `${prefix}${nextValue ?? rawValue}${suffix}`;
+	});
+}
+
+function rewriteMarkdownImageRefsToStoredForm(content: string, env: S3Env): string {
+	return rewriteMarkdownImageRefs(content, (value) => extractManagedImageKey(value, env));
+}
+
+function rewriteMarkdownImageRefsToPublicUrl(content: string, env: S3Env): string {
+	return rewriteMarkdownImageRefs(content, (value) => {
+		const key = extractManagedImageKey(value, env);
+		return key ? getPublicUrl(env, key) : null;
+	});
+}
+
+function extractManagedImageKeysFromMarkdown(content: string, env: S3Env): string[] {
+	return extractImageUrls(content)
+		.map((value) => extractManagedImageKey(value, env))
+		.filter((value): value is string => !!value);
+}
+
+function normalizeAvatarValueForStorage(value: unknown, env: S3Env): string | null {
+	if (value === undefined || value === null) return null;
+	if (typeof value !== 'string') return null;
+	const trimmed = value.trim();
+	if (!trimmed) return null;
+	if (trimmed.startsWith('data:image/svg+xml')) return trimmed;
+	const key = extractManagedImageKey(trimmed, env);
+	return key ?? trimmed;
+}
+
+function rewriteAvatarValueToPublicUrl(value: unknown, env: S3Env): string | null {
+	if (value === undefined || value === null) return null;
+	if (typeof value !== 'string') return null;
+	const trimmed = value.trim();
+	if (!trimmed) return null;
+	if (trimmed.startsWith('data:')) return trimmed;
+	const key = extractManagedImageKey(trimmed, env);
+	return key ? getPublicUrl(env, key) : trimmed;
+}
+
+function rewritePostForResponse(post: any, env: S3Env) {
+	return {
+		...post,
+		content: rewriteMarkdownImageRefsToPublicUrl(post.content as string, env),
+		author_avatar: rewriteAvatarValueToPublicUrl(post.author_avatar, env)
+	};
+}
+
+function rewriteCommentForResponse(comment: any, env: S3Env) {
+	return {
+		...comment,
+		content: rewriteMarkdownImageRefsToPublicUrl(comment.content as string, env),
+		avatar_url: rewriteAvatarValueToPublicUrl(comment.avatar_url, env)
+	};
 }
 
 // Utility to hash password
@@ -771,7 +836,7 @@ export default {
 					id: user.id,
 					email: user.email,
 					username: user.username,
-					avatar_url: user.avatar_url,
+					avatar_url: rewriteAvatarValueToPublicUrl(user.avatar_url, env as unknown as S3Env),
 					role: user.role || 'user',
 					totp_enabled: !!user.totp_enabled,
 					email_notifications: user.email_notifications === 1,
@@ -830,7 +895,7 @@ export default {
 				]);
 
 				return jsonResponse({
-					posts: postsResult.results,
+					posts: postsResult.results.map((post: any) => rewritePostForResponse(post, env as unknown as S3Env)),
 					total: countResult ? countResult.total : 0
 				});
 			} catch (e) {
@@ -844,7 +909,7 @@ export default {
 				const userPayload = await authenticate(request);
 				const user = await env.forum_db.prepare('SELECT avatar_url FROM users WHERE id = ?').bind(userPayload.id).first();
 				if (!user) return jsonResponse({ error: 'User not found' }, 404);
-				return jsonResponse({ avatar_url: user.avatar_url || null });
+				return jsonResponse({ avatar_url: rewriteAvatarValueToPublicUrl(user.avatar_url, env as unknown as S3Env) });
 			} catch (e) {
 				return handleError(e);
 			}
@@ -887,10 +952,11 @@ export default {
 					return jsonResponse({ error: 'File size too large (Max 500KB)' }, 400);
 				}
 
-				const imageUrl = await uploadImage(env as unknown as S3Env, file, userId, postId.toString(), type as 'post' | 'avatar' | 'comment');
-				await security.logAudit(user.id, 'UPLOAD_IMAGE', 'image', imageUrl, { type, postId }, request);
-				
-				return jsonResponse({ success: true, url: imageUrl });
+				const imageKey = await uploadImage(env as unknown as S3Env, file, userId, postId.toString(), type as 'post' | 'avatar' | 'comment');
+				const imageUrl = getPublicUrl(env as unknown as S3Env, imageKey);
+				await security.logAudit(user.id, 'UPLOAD_IMAGE', 'image', imageKey, { type, postId }, request);
+
+				return jsonResponse({ success: true, key: imageKey, url: imageUrl });
 			} catch (e) {
 				console.error('Upload error:', e);
 				return handleError(e); // 401/403 will be caught here if auth fails
@@ -971,7 +1037,7 @@ export default {
 						id: user.id,
 						email: user.email,
 						username: user.username,
-						avatar_url: user.avatar_url,
+						avatar_url: rewriteAvatarValueToPublicUrl(user.avatar_url, env as unknown as S3Env),
 						role: user.role || 'user',
 						totp_enabled: !!user.totp_enabled,
 						email_notifications: user.email_notifications === 1
@@ -1021,8 +1087,8 @@ export default {
 						newAvatarUrl = await generateIdenticon(String(user_id));
 					} else {
 						if (avatar_url.length > 5000) return jsonResponse({ error: 'Avatar URL too long (Max 5000 chars)' }, 400);
-						if (!/^https?:\/\//i.test(avatar_url) && !avatar_url.startsWith('data:image/svg+xml')) return jsonResponse({ error: 'Invalid Avatar URL (Must start with http:// or https://)' }, 400);
-						newAvatarUrl = avatar_url;
+						if (!/^https?:\/\//i.test(avatar_url) && !avatar_url.startsWith('data:image/svg+xml') && !extractManagedImageKey(avatar_url, env as unknown as S3Env)) return jsonResponse({ error: 'Invalid Avatar URL (Must start with http:// or https://)' }, 400);
+						newAvatarUrl = normalizeAvatarValueForStorage(avatar_url, env as unknown as S3Env);
 					}
 				}
 
@@ -1059,7 +1125,7 @@ export default {
 						id: user.id,
 						email: user.email,
 						username: user.username,
-						avatar_url: user.avatar_url,
+						avatar_url: rewriteAvatarValueToPublicUrl(user.avatar_url, env as unknown as S3Env),
 						role: user.role || 'user',
 						totp_enabled: !!user.totp_enabled,
 						email_notifications: user.email_notifications === 1,
@@ -1195,8 +1261,8 @@ export default {
 				
 				if (posts.results) {
 					for (const post of posts.results) {
-						const imageUrls = extractImageUrls(post.content as string);
-						imageUrls.forEach(url => deletionPromises.push(deleteImage(env as unknown as S3Env, url, user_id)));
+						const imageKeys = extractManagedImageKeysFromMarkdown(post.content as string, env as unknown as S3Env);
+						imageKeys.forEach(key => deletionPromises.push(deleteImage(env as unknown as S3Env, key, user_id)));
 					}
 				}
 				
@@ -1540,8 +1606,8 @@ export default {
 						await env.forum_db.prepare('UPDATE users SET avatar_url = ? WHERE id = ?').bind(identicon, id).run();
 					} else {
 						if (avatar_url.length > 5000) return jsonResponse({ error: 'Avatar URL too long (Max 5000 chars)' }, 400);
-						if (!/^https?:\/\//i.test(avatar_url) && !avatar_url.startsWith('data:image/svg+xml')) return jsonResponse({ error: 'Invalid Avatar URL' }, 400);
-						await env.forum_db.prepare('UPDATE users SET avatar_url = ? WHERE id = ?').bind(avatar_url, id).run();
+						if (!/^https?:\/\//i.test(avatar_url) && !avatar_url.startsWith('data:image/svg+xml') && !extractManagedImageKey(avatar_url, env as unknown as S3Env)) return jsonResponse({ error: 'Invalid Avatar URL' }, 400);
+						await env.forum_db.prepare('UPDATE users SET avatar_url = ? WHERE id = ?').bind(normalizeAvatarValueForStorage(avatar_url, env as unknown as S3Env), id).run();
 					}
 
 					// Notify Avatar Change
@@ -1691,7 +1757,10 @@ export default {
 				query += ' ORDER BY created_at DESC';
 
 				const { results } = await env.forum_db.prepare(query).bind(...params).all();
-				return jsonResponse(results);
+				return jsonResponse(results.map((user: any) => ({
+					...user,
+					avatar_url: rewriteAvatarValueToPublicUrl(user.avatar_url, env as unknown as S3Env)
+				})));
 			} catch (e) {
 				return handleError(e);
 			}
@@ -1770,8 +1839,8 @@ export default {
 				}
 				if (posts.results) {
 					for (const post of posts.results) {
-						const imageUrls = extractImageUrls(post.content as string);
-						imageUrls.forEach(url => deletionPromises.push(deleteImage(env as unknown as S3Env, url, id)));
+						const imageKeys = extractManagedImageKeysFromMarkdown(post.content as string, env as unknown as S3Env);
+						imageKeys.forEach(key => deletionPromises.push(deleteImage(env as unknown as S3Env, key, id)));
 					}
 				}
 				if (deletionPromises.length > 0) {
@@ -1829,9 +1898,9 @@ export default {
 				).bind(id).first();
 				if (!post) return jsonResponse({ error: 'Post not found' }, 404);
 
-				const imageUrls = extractImageUrls(post.content as string);
-				if (imageUrls.length > 0) {
-					ctx.waitUntil(Promise.all(imageUrls.map(url => deleteImage(env as unknown as S3Env, url, post.author_id as number))).catch(err => console.error('Failed to delete post images', err)));
+				const imageKeys = extractManagedImageKeysFromMarkdown(post.content as string, env as unknown as S3Env);
+				if (imageKeys.length > 0) {
+					ctx.waitUntil(Promise.all(imageKeys.map(key => deleteImage(env as unknown as S3Env, key, post.author_id as number))).catch(err => console.error('Failed to delete post images', err)));
 				}
 
 				await env.forum_db.prepare('DELETE FROM likes WHERE post_id = ?').bind(id).run();
@@ -1951,39 +2020,31 @@ export default {
 				// 1. List all S3 objects
 				const allKeys = await listAllKeys(env as unknown as S3Env);
 				
-				// 2. Gather used URLs
+				// 2. Gather used keys
 				const usedKeys = new Set<string>();
-				// Helper to get base endpoint for matching
-				const endpoint = getPublicUrl(env as unknown as S3Env, '').replace(/\/$/, ''); 
 
 				// Users avatars
 				const users = await env.forum_db.prepare('SELECT avatar_url FROM users WHERE avatar_url IS NOT NULL').all();
 				for (const u of users.results) {
-					const uUrl = u.avatar_url as string;
-					if (uUrl && uUrl.startsWith(endpoint)) {
-						usedKeys.add(uUrl.substring(endpoint.length + 1));
-					}
+					const key = extractManagedImageKey(u.avatar_url as string, env as unknown as S3Env);
+					if (key) usedKeys.add(key);
 				}
 
 				// Posts images
 				const posts = await env.forum_db.prepare('SELECT content FROM posts').all();
 				for (const p of posts.results) {
-					const urls = extractImageUrls(p.content as string);
-					for (const uUrl of urls) {
-						if (uUrl && uUrl.startsWith(endpoint)) {
-							usedKeys.add(uUrl.substring(endpoint.length + 1));
-						}
+					const keys = extractManagedImageKeysFromMarkdown(p.content as string, env as unknown as S3Env);
+					for (const key of keys) {
+						usedKeys.add(key);
 					}
 				}
 
 				// Comments images
 				const comments = await env.forum_db.prepare('SELECT content FROM comments').all();
 				for (const c of comments.results) {
-					const urls = extractImageUrls(c.content as string);
-					for (const uUrl of urls) {
-						if (uUrl && uUrl.startsWith(endpoint)) {
-							usedKeys.add(uUrl.substring(endpoint.length + 1));
-						}
+					const keys = extractManagedImageKeysFromMarkdown(c.content as string, env as unknown as S3Env);
+					for (const key of keys) {
+						usedKeys.add(key);
 					}
 				}
 
@@ -2013,7 +2074,7 @@ export default {
 				
 				if (!orphans || !Array.isArray(orphans)) return jsonResponse({ error: 'Invalid parameters' }, 400);
 
-				const deletePromises = orphans.map(key => deleteImage(env as unknown as S3Env, getPublicUrl(env as unknown as S3Env, key)));
+				const deletePromises = orphans.map(key => deleteImage(env as unknown as S3Env, key));
 				
 				ctx.waitUntil(Promise.all(deletePromises).catch(err => console.error('Cleanup failed', err)));
 				
@@ -2230,7 +2291,7 @@ export default {
 				return jsonResponse({
 					id: user.id,
 					username: user.username,
-					avatar_url: user.avatar_url ?? null,
+					avatar_url: rewriteAvatarValueToPublicUrl(user.avatar_url, env as unknown as S3Env),
 					role: user.role || 'user',
 					gender: user.gender ?? null,
 					bio: user.bio ?? null,
@@ -2290,7 +2351,7 @@ export default {
 				]);
 
 				return jsonResponse({
-					posts: postsResult.results,
+					posts: postsResult.results.map((post: any) => rewritePostForResponse(post, env as unknown as S3Env)),
 					total: countResult ? countResult.total : 0
 				});
 			} catch (e) {
@@ -2398,7 +2459,7 @@ export default {
                 ]);
 
 				return jsonResponse({
-                    posts: postsResult.results,
+                    posts: postsResult.results.map((post: any) => rewritePostForResponse(post, env as unknown as S3Env)),
                     total: countResult ? countResult.total : 0
                 });
 			} catch (e) {
@@ -2431,7 +2492,7 @@ export default {
 					await env.forum_db.prepare('UPDATE posts SET view_count = COALESCE(view_count, 0) + 1 WHERE id = ?').bind(postId).run();
 					(post as any).view_count = Number((post as any).view_count || 0) + 1;
 				} catch {}
-				
+
 				// Check like status if user_id provided
 				const userId = url.searchParams.get('user_id');
 				if (userId) {
@@ -2439,7 +2500,7 @@ export default {
 					(post as any).liked = !!like;
 				}
 
-				return jsonResponse(post);
+				return jsonResponse(rewritePostForResponse(post, env as unknown as S3Env));
 			} catch (e) {
 				return handleError(e);
 			}
@@ -2481,10 +2542,12 @@ export default {
 					if (!category) return jsonResponse({ error: 'Category not found' }, 400);
 				}
 
+				const storedContent = rewriteMarkdownImageRefsToStoredForm(content.trim(), env as unknown as S3Env);
+
 				await env.forum_db.prepare(
 					'UPDATE posts SET title = ?, content = ?, category_id = ? WHERE id = ?'
-				).bind(title.trim(), content.trim(), category_id || null, postId).run();
-				
+				).bind(title.trim(), storedContent, category_id || null, postId).run();
+
 				await security.logAudit(userPayload.id, 'UPDATE_POST', 'post', postId, { title_length: title.length }, request);
 
 				// WebSocket broadcast for real-time updates via Durable Object
@@ -2499,7 +2562,7 @@ export default {
 							payload: {
 								postId: postId,
 								title: title.trim(),
-								content: content.trim(),
+								content: rewriteMarkdownImageRefsToPublicUrl(storedContent, env as unknown as S3Env),
 								category_id: category_id || null,
 								updated_at: new Date().toISOString()
 							}
@@ -2528,9 +2591,9 @@ export default {
 				}
 
 				// Delete images in post
-				const imageUrls = extractImageUrls(post.content as string);
-				if (imageUrls.length > 0) {
-					ctx.waitUntil(Promise.all(imageUrls.map(url => deleteImage(env as unknown as S3Env, url, userPayload.id))).catch(err => console.error('Failed to delete post images', err)));
+				const imageKeys = extractManagedImageKeysFromMarkdown(post.content as string, env as unknown as S3Env);
+				if (imageKeys.length > 0) {
+					ctx.waitUntil(Promise.all(imageKeys.map(key => deleteImage(env as unknown as S3Env, key, userPayload.id))).catch(err => console.error('Failed to delete post images', err)));
 				}
 
 				await env.forum_db.prepare('DELETE FROM likes WHERE post_id = ?').bind(id).run();
@@ -2582,7 +2645,7 @@ export default {
 					 	${sortExpr}`
 				).bind(currentUserId, postId).all();
 				return jsonResponse(results.map((comment: any) => ({
-					...comment,
+					...rewriteCommentForResponse(comment, env as unknown as S3Env),
 					like_count: Number(comment.like_count || 0),
 					liked: !!comment.liked,
 					is_pinned: Number(comment.is_pinned || 0)
@@ -2607,7 +2670,7 @@ export default {
 
 				let { content, parent_id } = body;
 				// user_id comes from token now
-				
+
 				if (!content) return jsonResponse({ error: 'Missing parameters' }, 400);
 				
 				// --- Input Sanitization & Validation (Sync with Frontend) ---
@@ -2655,10 +2718,12 @@ export default {
 					}
 				}
 
+				const storedContent = rewriteMarkdownImageRefsToStoredForm(content, env as unknown as S3Env);
+
 				const { success } = await env.forum_db.prepare(
 					'INSERT INTO comments (post_id, author_id, content, parent_id) VALUES (?, ?, ?, ?)'
-				).bind(postId, userPayload.id, content, parent_id || null).run();
-				
+				).bind(postId, userPayload.id, storedContent, parent_id || null).run();
+
 				await security.logAudit(userPayload.id, 'CREATE_COMMENT', 'comment', 'new', { postId, parent_id }, request);
 
 				// Email Notification Logic
@@ -2678,7 +2743,7 @@ export default {
 						ctx.waitUntil(sendEmailByTemplate(post.email, 'post_new_comment', {
 							commenterName,
 							postTitle: post.title,
-							commentContent: content,
+							commentContent: rewriteMarkdownImageRefsToPublicUrl(storedContent, env as unknown as S3Env),
 							postUrl
 						}).catch(console.error));
 					}
@@ -2704,7 +2769,7 @@ export default {
 									ctx.waitUntil(sendEmailByTemplate(parentCommentUser.email, 'comment_new_reply', {
 										commenterName,
 										postTitle: post.title,
-										replyContent: content,
+										replyContent: rewriteMarkdownImageRefsToPublicUrl(storedContent, env as unknown as S3Env),
 										postUrl
 									}).catch(console.error));
 								}
@@ -2724,7 +2789,7 @@ export default {
 								payload: {
 									postId: postId,
 									comment: {
-										content: content,
+										content: rewriteMarkdownImageRefsToPublicUrl(storedContent, env as unknown as S3Env),
 										author_name: commenterName,
 										author_id: userPayload.id,
 										parent_id: parent_id || null,
@@ -2890,9 +2955,11 @@ export default {
 					if (!category) return jsonResponse({ error: 'Category not found' }, 400);
 				}
 
+				const storedContent = rewriteMarkdownImageRefsToStoredForm(content.trim(), env as unknown as S3Env);
+
 				const { success, meta } = await env.forum_db.prepare(
 					'INSERT INTO posts (author_id, title, content, category_id) VALUES (?, ?, ?, ?)'
-				).bind(userPayload.id, safeTitle.trim(), content.trim(), category_id || null).run();
+				).bind(userPayload.id, safeTitle.trim(), storedContent, category_id || null).run();
 				const postId = Number(meta?.last_row_id || 0) || null;
 
 				await security.logAudit(userPayload.id, 'CREATE_POST', 'post', String(postId || 'new'), { title_length: safeTitle.length }, request);
