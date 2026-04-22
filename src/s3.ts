@@ -6,6 +6,7 @@ export interface S3Env {
     AWS_SECRET_ACCESS_KEY: string;
     AWS_REGION: string;
     AWS_ENDPOINT: string;
+    AWS_ENDPOINT_BACKEND?: string;
     AWS_BUCKET: string;
     AWS_PATH_PREFIX?: string;
 }
@@ -17,6 +18,10 @@ function getClient(env: S3Env) {
         region: env.AWS_REGION,
         service: 's3',
     });
+}
+
+function getBackendEndpoint(env: S3Env): string {
+    return normalizeEndpoint(env.AWS_ENDPOINT_BACKEND || env.AWS_ENDPOINT);
 }
 
 function normalizeKey(value: string): string {
@@ -72,7 +77,8 @@ export async function uploadImage(env: S3Env, file: File, userId: string | numbe
         key = `${pathPrefix}/usr/${userId}/post/${postId}/${filename}`.replace(/^\/+/, '');
     }
 
-    const url = getPublicUrl(env, key);
+    const backendEndpoint = getBackendEndpoint(env);
+    const url = `${backendEndpoint}/${env.AWS_BUCKET}/${normalizeKey(key)}`;
 
     const res = await s3.fetch(url, {
         method: 'PUT',
@@ -103,7 +109,8 @@ export async function deleteImage(env: S3Env, imageValue: string, expectedOwnerI
     }
 
     const s3 = getClient(env);
-    const url = getPublicUrl(env, key);
+    const backendEndpoint = getBackendEndpoint(env);
+    const url = `${backendEndpoint}/${env.AWS_BUCKET}/${normalizeKey(key)}`;
     const res = await s3.fetch(url, { method: 'DELETE' });
 
     return res.ok;
@@ -114,10 +121,10 @@ export async function listAllKeys(env: S3Env): Promise<string[]> {
     const keys: string[] = [];
     let continuationToken: string | undefined = undefined;
     const pathPrefix = env.AWS_PATH_PREFIX || '';
-    const endpoint = normalizeEndpoint(env.AWS_ENDPOINT);
+    const backendEndpoint = getBackendEndpoint(env);
 
     do {
-        let url = `${endpoint}/${env.AWS_BUCKET}?list-type=2`;
+        let url = `${backendEndpoint}/${env.AWS_BUCKET}?list-type=2`;
         if (pathPrefix) {
              const prefix = pathPrefix.replace(/^\/+/, '');
              url += `&prefix=${encodeURIComponent(prefix)}`;

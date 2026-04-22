@@ -12,6 +12,13 @@ declare namespace Cloudflare {
 		TURNSTILE_SECRET_KEY?: string;
 		BLOG_WEBHOOK_SECRET?: string;
 		WS_MANAGER: DurableObjectNamespace;
+		AWS_ACCESS_KEY_ID?: string;
+		AWS_SECRET_ACCESS_KEY?: string;
+		AWS_REGION?: string;
+		AWS_ENDPOINT?: string;
+		AWS_ENDPOINT_BACKEND?: string;
+		AWS_BUCKET?: string;
+		AWS_PATH_PREFIX?: string;
 	}
 }
 interface Env extends Cloudflare.Env {}
