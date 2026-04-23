@@ -421,7 +421,7 @@ build: (payload) => ({
 					<p><strong>摘要：</strong>${escapeHtml(payload.summary)}</p>
 					<p><strong>链接：</strong></p>
 					<p>${payload.articleLinks}</p>
-					<p style="font-size:0.8em;color:#666;">您收到这封邮件，是因为您已开启文章更新邮件提醒。</p>
+					<p style="font-size:0.8em;color:#666;">您收到这封邮件，是因为您已开启文章更新邮件提醒。如需更改您的首选项，请前往 <a href="https://2x.nz/forum/me/">https://2x.nz/forum/me/</a></p>
 					${EMAIL_REPLY_HINT}
 				`
 		})
