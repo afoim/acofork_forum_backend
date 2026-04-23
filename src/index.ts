@@ -4,6 +4,7 @@ import { generateIdenticon } from './identicon';
 import { uploadImage, deleteImage, listAllKeys, getPublicUrl, extractImageKey, S3Env } from './s3';
 import * as OTPAuth from 'otpauth';
 import { Security, UserPayload } from './security';
+import { SignJWT, jwtVerify } from 'jose';
 export { SSEHub, handleSSEConnection } from './sse-hub';
 
 // Utility to extract image URLs from Markdown content
@@ -650,8 +651,9 @@ export default {
 // --- SECURITY CHECK (Replay + Headers) ---
 		// Skip for public GET, Login, Register, Verify, Forgot/Reset Password, Config
 		const publicPaths = [
-			'/api/config', '/api/login', '/api/register', '/api/verify', 
+			'/api/config', '/api/login', '/api/register', '/api/verify',
 			'/api/auth/forgot-password', '/api/auth/reset-password', '/api/verify-email-change',
+			'/api/auth/github/start', '/api/auth/github/callback',
 			 // Static/Public GETs
 			'/api/posts', '/api/categories', '/api/users',
 			 // Webhook endpoints (validated by secret)
@@ -845,7 +847,11 @@ export default {
 					bio: user.bio ?? null,
 					age: user.age ?? null,
 					region: user.region ?? null,
-					last_seen_at: user.last_seen_at ?? null
+					last_seen_at: user.last_seen_at ?? null,
+					github_id: user.github_id ? Number(user.github_id) : null,
+					github_login: user.github_login ?? null,
+					github_avatar_url: user.github_avatar_url ?? null,
+					has_password: !!(user.password && String(user.password).length > 0)
 				});
 			} catch (e) {
 				return handleError(e);
@@ -964,6 +970,280 @@ export default {
 		}
 
 		// --- AUTH ROUTES ---
+
+		// --- GitHub OAuth ---
+		const FRONTEND_BASE = 'https://2x.nz/forum';
+		const GITHUB_DEFAULT_REDIRECT = `${FRONTEND_BASE}/auth/login/`;
+		const GITHUB_OAUTH_STATE_TTL = 600; // seconds
+
+		const getGithubSecretKey = (): Uint8Array | null => {
+			const secret = String(env.JWT_SECRET || '');
+			if (secret.length < 32) return null;
+			return new TextEncoder().encode(secret);
+		};
+
+		const getGithubCallbackUrl = (): string => `${url.origin}/api/auth/github/callback`;
+
+		const sanitizeRedirect = (raw: string | null | undefined): string => {
+			if (!raw) return GITHUB_DEFAULT_REDIRECT;
+			try {
+				const parsed = new URL(raw);
+				if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') return GITHUB_DEFAULT_REDIRECT;
+				const allowedHosts = new Set(['2x.nz', 'www.2x.nz', 'i.2x.nz', 'localhost', '127.0.0.1']);
+				if (!allowedHosts.has(parsed.hostname)) return GITHUB_DEFAULT_REDIRECT;
+				return parsed.toString();
+			} catch {
+				return GITHUB_DEFAULT_REDIRECT;
+			}
+		};
+
+		const appendQueryToRedirect = (redirect: string, params: Record<string, string>): string => {
+			try {
+				const target = new URL(redirect);
+				for (const [k, v] of Object.entries(params)) target.searchParams.set(k, v);
+				return target.toString();
+			} catch {
+				const sep = redirect.includes('?') ? '&' : '?';
+				const qs = new URLSearchParams(params).toString();
+				return `${redirect}${sep}${qs}`;
+			}
+		};
+
+		const signGithubState = async (payload: { mode: 'login' | 'link'; redirect: string; userId?: number }): Promise<string | null> => {
+			const key = getGithubSecretKey();
+			if (!key) return null;
+			return await new SignJWT(payload)
+				.setProtectedHeader({ alg: 'HS256' })
+				.setIssuedAt()
+				.setExpirationTime(Math.floor(Date.now() / 1000) + GITHUB_OAUTH_STATE_TTL)
+				.sign(key);
+		};
+
+		const verifyGithubState = async (token: string): Promise<{ mode: 'login' | 'link'; redirect: string; userId?: number } | null> => {
+			const key = getGithubSecretKey();
+			if (!key) return null;
+			try {
+				const { payload } = await jwtVerify(token, key);
+				const mode = (payload as any).mode;
+				const redirect = (payload as any).redirect;
+				if (mode !== 'login' && mode !== 'link') return null;
+				if (typeof redirect !== 'string' || !redirect) return null;
+				return { mode, redirect, userId: typeof (payload as any).userId === 'number' ? (payload as any).userId : undefined };
+			} catch {
+				return null;
+			}
+		};
+
+		// GET /api/auth/github/start?mode=login|link&redirect=<url>
+		// 对 link 模式需在 Authorization: Bearer 头携带当前用户 token。
+		// 返回 { authorize_url, state }。前端 window.location = authorize_url 即可。
+		if (url.pathname === '/api/auth/github/start' && method === 'GET') {
+			try {
+				if (!env.GITHUB_CLIENT_ID) return jsonResponse({ error: 'GitHub OAuth 未配置' }, 500);
+				const mode = (url.searchParams.get('mode') || 'login') === 'link' ? 'link' : 'login';
+				const redirect = sanitizeRedirect(url.searchParams.get('redirect'));
+
+				let userId: number | undefined;
+				if (mode === 'link') {
+					const userPayload = await authenticate(request);
+					userId = userPayload.id;
+				}
+
+				const state = await signGithubState({ mode, redirect, userId });
+				if (!state) return jsonResponse({ error: '服务端密钥未配置' }, 500);
+
+				const authorizeUrl = new URL('https://github.com/login/oauth/authorize');
+				authorizeUrl.searchParams.set('client_id', env.GITHUB_CLIENT_ID);
+				authorizeUrl.searchParams.set('redirect_uri', getGithubCallbackUrl());
+				authorizeUrl.searchParams.set('scope', 'read:user user:email');
+				authorizeUrl.searchParams.set('state', state);
+				authorizeUrl.searchParams.set('allow_signup', 'true');
+
+				return jsonResponse({ authorize_url: authorizeUrl.toString(), state });
+			} catch (e) {
+				return handleError(e);
+			}
+		}
+
+		// GET /api/auth/github/callback?code&state
+		// GitHub 回调：交换 token、拉取用户信息、按 mode 进行登录或绑定，最后 302 回前端 redirect。
+		if (url.pathname === '/api/auth/github/callback' && method === 'GET') {
+			const code = url.searchParams.get('code');
+			const stateRaw = url.searchParams.get('state');
+			const errParam = url.searchParams.get('error');
+
+			const failRedirect = (target: string, msg: string) =>
+				redirectResponse(appendQueryToRedirect(target, { github_error: msg }));
+
+			if (errParam) {
+				return failRedirect(GITHUB_DEFAULT_REDIRECT, errParam);
+			}
+			if (!code || !stateRaw) {
+				return failRedirect(GITHUB_DEFAULT_REDIRECT, 'missing_code_or_state');
+			}
+
+			const state = await verifyGithubState(stateRaw);
+			if (!state) {
+				return failRedirect(GITHUB_DEFAULT_REDIRECT, 'invalid_state');
+			}
+
+			if (!env.GITHUB_CLIENT_ID || !env.GITHUB_CLIENT_SECRET) {
+				return failRedirect(state.redirect, 'oauth_not_configured');
+			}
+
+			try {
+				// 1. Exchange code for access token
+				const tokenRes = await fetch('https://github.com/login/oauth/access_token', {
+					method: 'POST',
+					headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
+					body: JSON.stringify({
+						client_id: env.GITHUB_CLIENT_ID,
+						client_secret: env.GITHUB_CLIENT_SECRET,
+						code,
+						redirect_uri: getGithubCallbackUrl(),
+					})
+				});
+				if (!tokenRes.ok) return failRedirect(state.redirect, 'token_exchange_failed');
+				const tokenJson = await tokenRes.json() as { access_token?: string; error?: string };
+				if (!tokenJson.access_token) return failRedirect(state.redirect, tokenJson.error || 'no_access_token');
+
+				const accessToken = tokenJson.access_token;
+				const ghHeaders = {
+					'Authorization': `Bearer ${accessToken}`,
+					'Accept': 'application/vnd.github+json',
+					'User-Agent': 'AcoFork-Forum-Worker'
+				};
+
+				// 2. Fetch user profile
+				const userRes = await fetch('https://api.github.com/user', { headers: ghHeaders });
+				if (!userRes.ok) return failRedirect(state.redirect, 'fetch_user_failed');
+				const ghUser = await userRes.json() as { id: number; login: string; avatar_url?: string; email?: string | null; name?: string | null };
+				if (!ghUser.id || !ghUser.login) return failRedirect(state.redirect, 'invalid_github_user');
+
+				// 3. Fetch primary verified email if profile email is null
+				let primaryEmail = ghUser.email && ghUser.email.toLowerCase() !== 'null' ? ghUser.email : null;
+				if (!primaryEmail) {
+					const emailRes = await fetch('https://api.github.com/user/emails', { headers: ghHeaders });
+					if (emailRes.ok) {
+						const emails = await emailRes.json() as Array<{ email: string; primary: boolean; verified: boolean }>;
+						const found = emails.find(e => e.primary && e.verified) || emails.find(e => e.verified);
+						if (found) primaryEmail = found.email;
+					}
+				}
+
+				const ghIdNum = Number(ghUser.id);
+
+				if (state.mode === 'link') {
+					if (!state.userId) return failRedirect(state.redirect, 'invalid_link_state');
+					// 检查该 GitHub 账号是否已绑定其他用户
+					const existing = await env.forum_db.prepare('SELECT id FROM users WHERE github_id = ?').bind(ghIdNum).first();
+					if (existing && Number(existing.id) !== state.userId) {
+						return failRedirect(state.redirect, 'github_already_linked_to_other');
+					}
+					await env.forum_db.prepare(
+						'UPDATE users SET github_id = ?, github_login = ?, github_avatar_url = ? WHERE id = ?'
+					).bind(ghIdNum, ghUser.login, ghUser.avatar_url || null, state.userId).run();
+					await security.logAudit(state.userId, 'GITHUB_LINK', 'user', String(state.userId), { github_id: ghIdNum, github_login: ghUser.login }, request);
+					return redirectResponse(appendQueryToRedirect(state.redirect, { github_linked: '1' }));
+				}
+
+				// === LOGIN mode ===
+				// 1) by github_id
+				let userRow: any = await env.forum_db.prepare('SELECT * FROM users WHERE github_id = ?').bind(ghIdNum).first();
+				let isNewUser = false;
+
+				// 2) fallback: by verified email (auto-link existing email account)
+				if (!userRow && primaryEmail) {
+					userRow = await env.forum_db.prepare('SELECT * FROM users WHERE email = ?').bind(primaryEmail).first();
+					if (userRow) {
+						await env.forum_db.prepare(
+							'UPDATE users SET github_id = ?, github_login = ?, github_avatar_url = ? WHERE id = ?'
+						).bind(ghIdNum, ghUser.login, ghUser.avatar_url || null, userRow.id).run();
+					}
+				}
+
+				// 3) create new account
+				if (!userRow) {
+					if (!primaryEmail) return failRedirect(state.redirect, 'github_email_unavailable');
+
+					// username 唯一化（用 github login，冲突追加随机后缀）
+					let candidate = ghUser.login.slice(0, 20);
+					if (!candidate) candidate = `gh_${ghIdNum}`;
+					const existsName = await env.forum_db.prepare('SELECT id FROM users WHERE username = ?').bind(candidate).first();
+					if (existsName) {
+						candidate = (candidate.slice(0, 14) + '_' + Math.random().toString(36).slice(2, 6)).slice(0, 20);
+					}
+
+					// 邮箱冲突再次保护
+					const existsEmail = await env.forum_db.prepare('SELECT id FROM users WHERE email = ?').bind(primaryEmail).first();
+					if (existsEmail) {
+						return failRedirect(state.redirect, 'email_conflict');
+					}
+
+					const placeholderPassword = ''; // 通过 GitHub 注册的账号，password 留空，禁止密码登录直到用户设置密码
+					const insertRes = await env.forum_db.prepare(
+						'INSERT INTO users (email, username, password, role, verified, github_id, github_login, github_avatar_url, avatar_url) VALUES (?, ?, ?, "user", 1, ?, ?, ?, ?)'
+					).bind(
+						primaryEmail,
+						candidate,
+						placeholderPassword,
+						ghIdNum,
+						ghUser.login,
+						ghUser.avatar_url || null,
+						ghUser.avatar_url || null
+					).run();
+					const newId = insertRes.meta?.last_row_id;
+					if (!newId) return failRedirect(state.redirect, 'create_user_failed');
+					if (!ghUser.avatar_url) {
+						const identicon = await generateIdenticon(String(newId));
+						await env.forum_db.prepare('UPDATE users SET avatar_url = ? WHERE id = ?').bind(identicon, newId).run();
+					}
+					userRow = await env.forum_db.prepare('SELECT * FROM users WHERE id = ?').bind(newId).first();
+					isNewUser = true;
+				}
+
+				if (!userRow) return failRedirect(state.redirect, 'login_failed');
+
+				const sessionTtlDays = await getSessionTtlDays();
+				const sessionTtlSeconds = sessionTtlDays * 24 * 60 * 60;
+				const { token, jti, expiresAt } = await security.generateToken(
+					{ id: Number(userRow.id), role: String(userRow.role || 'user'), email: String(userRow.email) },
+					sessionTtlSeconds
+				);
+				await env.forum_db.prepare('INSERT INTO sessions (jti, user_id, expires_at) VALUES (?, ?, ?)').bind(jti, userRow.id, expiresAt).run();
+				await security.logAudit(Number(userRow.id), isNewUser ? 'GITHUB_REGISTER_LOGIN' : 'GITHUB_LOGIN', 'user', String(userRow.id), { github_id: ghIdNum, github_login: ghUser.login }, request);
+
+				// 通过 URL fragment 回传 token，避免落入 referer / 服务器日志
+				const finalUrl = (() => {
+					const base = state.redirect;
+					const sep = base.includes('#') ? '&' : '#';
+					const qs = new URLSearchParams({ token, new: isNewUser ? '1' : '0' }).toString();
+					return `${base}${sep}${qs}`;
+				})();
+				return redirectResponse(finalUrl);
+			} catch (e) {
+				console.error('[GitHub OAuth] callback failed', e);
+				return failRedirect(state?.redirect || GITHUB_DEFAULT_REDIRECT, 'internal_error');
+			}
+		}
+
+		// POST /api/auth/github/unlink — 解绑 GitHub。要求账号本身有可登录密码，避免用户被锁出。
+		if (url.pathname === '/api/auth/github/unlink' && method === 'POST') {
+			try {
+				const userPayload = await authenticate(request);
+				const user = await env.forum_db.prepare('SELECT id, password, github_id FROM users WHERE id = ?').bind(userPayload.id).first();
+				if (!user) return jsonResponse({ error: '用户不存在' }, 404);
+				if (!user.github_id) return jsonResponse({ error: '当前账号未绑定 GitHub' }, 400);
+				if (!user.password || String(user.password).length === 0) {
+					return jsonResponse({ error: '请先设置登录密码后再解绑 GitHub，否则将无法登录' }, 400);
+				}
+				await env.forum_db.prepare('UPDATE users SET github_id = NULL, github_login = NULL, github_avatar_url = NULL WHERE id = ?').bind(userPayload.id).run();
+				await security.logAudit(userPayload.id, 'GITHUB_UNLINK', 'user', String(userPayload.id), {}, request);
+				return jsonResponse({ success: true });
+			} catch (e) {
+				return handleError(e);
+			}
+		}
 
 		// POST /api/login
 		if (url.pathname === '/api/login' && method === 'POST') {

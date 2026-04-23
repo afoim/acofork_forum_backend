@@ -19,6 +19,11 @@ declare namespace Cloudflare {
 		AWS_ENDPOINT_BACKEND?: string;
 		AWS_BUCKET?: string;
 		AWS_PATH_PREFIX?: string;
+		GITHUB_CLIENT_ID?: string;
+		GITHUB_CLIENT_SECRET?: string;
+		JWT_SECRET?: string;
+		RESEND_KEY?: string;
+		RESEND_SEND?: string;
 	}
 }
 interface Env extends Cloudflare.Env {}
