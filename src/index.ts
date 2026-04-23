@@ -1093,19 +1093,35 @@ export default {
 
 			try {
 				// 1. Exchange code for access token
+				const callbackUrl = getGithubCallbackUrl();
+				console.log('[GitHub OAuth] exchanging code, redirect_uri =', callbackUrl, ', client_id =', env.GITHUB_CLIENT_ID);
 				const tokenRes = await fetch('https://github.com/login/oauth/access_token', {
 					method: 'POST',
-					headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
+					headers: {
+						'Accept': 'application/json',
+						'Content-Type': 'application/json',
+						'User-Agent': 'AcoFork-Forum-Worker'
+					},
 					body: JSON.stringify({
 						client_id: env.GITHUB_CLIENT_ID,
 						client_secret: env.GITHUB_CLIENT_SECRET,
 						code,
-						redirect_uri: getGithubCallbackUrl(),
+						redirect_uri: callbackUrl,
 					})
 				});
-				if (!tokenRes.ok) return failRedirect(state.redirect, 'token_exchange_failed');
-				const tokenJson = await tokenRes.json() as { access_token?: string; error?: string };
-				if (!tokenJson.access_token) return failRedirect(state.redirect, tokenJson.error || 'no_access_token');
+				const tokenText = await tokenRes.text();
+				console.log('[GitHub OAuth] token endpoint status =', tokenRes.status, ', body =', tokenText);
+				if (!tokenRes.ok) return failRedirect(state.redirect, `token_http_${tokenRes.status}`);
+				let tokenJson: { access_token?: string; error?: string; error_description?: string };
+				try {
+					tokenJson = JSON.parse(tokenText);
+				} catch {
+					return failRedirect(state.redirect, 'token_response_not_json');
+				}
+				if (!tokenJson.access_token) {
+					const reason = tokenJson.error_description || tokenJson.error || 'no_access_token';
+					return failRedirect(state.redirect, encodeURIComponent(reason).slice(0, 200));
+				}
 
 				const accessToken = tokenJson.access_token;
 				const ghHeaders = {
