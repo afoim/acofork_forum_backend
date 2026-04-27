@@ -6,7 +6,6 @@ import * as OTPAuth from 'otpauth';
 import { Security, UserPayload } from './security';
 import { SignJWT, jwtVerify } from 'jose';
 export { SSEHub, handleSSEConnection } from './sse-hub';
-export { DrawWsProxy } from './draw-ws-proxy';
 
 // Utility to extract image URLs from Markdown content
 function extractImageUrls(content: string): string[] {
@@ -3385,73 +3384,51 @@ export default {
 		const DRAW_BACKEND = 'https://d.2x.nz';
 		const DRAW_ACCESS_CLIENT_ID = '6864bbcb13aa07d0f6f51233acdc9ad8.access';
 		const DRAW_ACCESS_CLIENT_SECRET = (env as any).AI_DRAW_ACCESS || '';
+		const DRAW_API_SECRET = (env as any).DRAW_API_SECRET || '';
 
-		// WebSocket proxy for /api/draw/ws/* via Durable Object
-		if (url.pathname.startsWith('/api/draw/ws/') && request.headers.get('Upgrade') === 'websocket') {
-			let userPayload: UserPayload;
+		// POST /api/draw/ws/ticket — 鉴权+限流后签发直连 ticket
+		if (url.pathname === '/api/draw/ws/ticket' && method === 'POST') {
 			try {
-				userPayload = await authenticate(request);
-			} catch {
-				const wsToken = url.searchParams.get('token');
-				if (!wsToken) return jsonResponse({ error: 'Unauthorized' }, 401);
-				const payload = await security.verifyToken(wsToken);
-				if (!payload) return jsonResponse({ error: 'Invalid Token' }, 401);
-				userPayload = payload;
-			}
+				const userPayload = await authenticate(request);
 
-			const drawUser = await env.forum_db.prepare(
-				'SELECT username, draw_banned FROM users WHERE id = ?'
-			).bind(userPayload.id).first();
-			const creatorName = (drawUser?.username as string) || userPayload.email || 'unknown';
+				const drawUser = await env.forum_db.prepare(
+					'SELECT username, draw_banned FROM users WHERE id = ?'
+				).bind(userPayload.id).first();
+				const creatorName = (drawUser?.username as string) || userPayload.email || 'unknown';
 
-			if (drawUser && drawUser.draw_banned) {
-				const [client, server] = Object.values(new WebSocketPair());
-				server.accept();
-				server.send(JSON.stringify({ type: 'error', message: '你已被禁止使用生图功能', banned: true }));
-				server.close(1008, 'draw banned');
-				return new Response(null, { status: 101, webSocket: client });
-			}
-
-			const backendPath = url.pathname.replace('/api/draw/ws/', '/ws/');
-
-			if (backendPath === '/ws/run' && userPayload.role !== 'admin') {
-				const cooldownSeconds = await getDrawCooldownSeconds();
-				if (cooldownSeconds > 0) {
-					const now = Math.floor(Date.now() / 1000);
-					const row = await env.forum_db.prepare(
-						'SELECT last_at FROM draw_rate_limits WHERE user_id = ?'
-					).bind(userPayload.id).first();
-					const lastAt = row ? Number(row.last_at) : 0;
-					const remaining = cooldownSeconds - (now - lastAt);
-					if (remaining > 0) {
-						const [client, server] = Object.values(new WebSocketPair());
-						server.accept();
-						server.send(JSON.stringify({ type: 'error', message: `生图冷却中，请等待 ${remaining} 秒后再试`, cooldown: true, remaining }));
-						server.close(1008, 'rate limited');
-						return new Response(null, { status: 101, webSocket: client });
-					}
-					await env.forum_db.prepare(
-						'INSERT OR REPLACE INTO draw_rate_limits (user_id, last_at) VALUES (?, ?)'
-					).bind(userPayload.id, now).run();
+				if (drawUser && drawUser.draw_banned) {
+					return jsonResponse({ error: '你已被禁止使用生图功能', banned: true }, 403);
 				}
+
+				const body = await request.json() as any;
+				const endpoint = body.endpoint || 'status';
+
+				if (endpoint === 'run' && userPayload.role !== 'admin') {
+					const cooldownSeconds = await getDrawCooldownSeconds();
+					if (cooldownSeconds > 0) {
+						const now = Math.floor(Date.now() / 1000);
+						const row = await env.forum_db.prepare(
+							'SELECT last_at FROM draw_rate_limits WHERE user_id = ?'
+						).bind(userPayload.id).first();
+						const lastAt = row ? Number(row.last_at) : 0;
+						const remaining = cooldownSeconds - (now - lastAt);
+						if (remaining > 0) {
+							return jsonResponse({ error: `生图冷却中，请等待 ${remaining} 秒后再试`, cooldown: true, remaining }, 429);
+						}
+						await env.forum_db.prepare(
+							'INSERT OR REPLACE INTO draw_rate_limits (user_id, last_at) VALUES (?, ?)'
+						).bind(userPayload.id, now).run();
+					}
+				}
+
+				const wsUrl = new URL(`${DRAW_BACKEND.replace('https:', 'wss:').replace('http:', 'ws:')}/ws/${endpoint}`);
+				if (DRAW_API_SECRET) wsUrl.searchParams.set('secret', DRAW_API_SECRET);
+				wsUrl.searchParams.set('creator_name', creatorName);
+
+				return jsonResponse({ url: wsUrl.toString() });
+			} catch (e) {
+				return handleError(e);
 			}
-
-			const cleanParams = new URLSearchParams(url.search);
-			cleanParams.delete('token');
-			const qs = cleanParams.toString();
-			const backendWsUrl = `${DRAW_BACKEND.replace('https:', 'wss:').replace('http:', 'ws:')}${backendPath}${qs ? '?' + qs : ''}`;
-
-			const doId = (env as any).DRAW_WS_PROXY.newUniqueId();
-			const stub = (env as any).DRAW_WS_PROXY.get(doId);
-			const doUrl = new URL('https://do/websocket');
-			doUrl.searchParams.set('backendUrl', backendWsUrl);
-			doUrl.searchParams.set('accessClientId', DRAW_ACCESS_CLIENT_ID);
-			doUrl.searchParams.set('accessClientSecret', DRAW_ACCESS_CLIENT_SECRET);
-			doUrl.searchParams.set('creatorName', creatorName);
-
-			return stub.fetch(doUrl.toString(), {
-				headers: { Upgrade: 'websocket' },
-			});
 		}
 
 		// Diagnostic endpoint for AI Draw proxy
@@ -3548,6 +3525,7 @@ export default {
 			proxyHeaders.set('CF-Access-Client-Id', DRAW_ACCESS_CLIENT_ID);
 			proxyHeaders.set('CF-Access-Client-Secret', DRAW_ACCESS_CLIENT_SECRET);
 			proxyHeaders.set('X-Creator-Name', httpCreatorName);
+			if (DRAW_API_SECRET) proxyHeaders.set('X-Draw-Secret', DRAW_API_SECRET);
 
 			const proxyInit: RequestInit = {
 				method: request.method,

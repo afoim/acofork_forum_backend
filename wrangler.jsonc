@@ -23,10 +23,6 @@
 			{
 				"name": "WS_MANAGER",
 				"class_name": "SSEHub"
-			},
-			{
-				"name": "DRAW_WS_PROXY",
-				"class_name": "DrawWsProxy"
 			}
 		]
 	},
@@ -40,10 +36,6 @@
 			"renamed_classes": [
 				{ "from": "ForumWebSocket", "to": "SSEHub" }
 			]
-		},
-		{
-			"tag": "v3",
-			"new_classes": ["DrawWsProxy"]
 		}
 	]
 }
