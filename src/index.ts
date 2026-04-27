@@ -3386,7 +3386,7 @@ export default {
 		const DRAW_ACCESS_CLIENT_SECRET = (env as any).AI_DRAW_ACCESS || '';
 		const DRAW_API_SECRET = (env as any).DRAW_API_SECRET || '';
 
-		// POST /api/draw/ws/ticket — 鉴权+限流后签发直连 ticket
+		// POST /api/draw/ws/ticket — 鉴权+限流检查（不消费）后签发直连 ticket
 		if (url.pathname === '/api/draw/ws/ticket' && method === 'POST') {
 			try {
 				const userPayload = await authenticate(request);
@@ -3415,9 +3415,7 @@ export default {
 						if (remaining > 0) {
 							return jsonResponse({ error: `生图冷却中，请等待 ${remaining} 秒后再试`, cooldown: true, remaining }, 429);
 						}
-						await env.forum_db.prepare(
-							'INSERT OR REPLACE INTO draw_rate_limits (user_id, last_at) VALUES (?, ?)'
-						).bind(userPayload.id, now).run();
+						// 不在签发时消费，由前端确认成功后调 confirm 端点写入
 					}
 				}
 
@@ -3436,6 +3434,21 @@ export default {
 				}
 
 				return jsonResponse({ url: wsUrl.toString() });
+			} catch (e) {
+				return handleError(e);
+			}
+		}
+
+		// POST /api/draw/ws/confirm — 前端确认生图开始，写入冷却时间
+		if (url.pathname === '/api/draw/ws/confirm' && method === 'POST') {
+			try {
+				const userPayload = await authenticate(request);
+				if (userPayload.role === 'admin') return jsonResponse({ ok: true });
+				const now = Math.floor(Date.now() / 1000);
+				await env.forum_db.prepare(
+					'INSERT OR REPLACE INTO draw_rate_limits (user_id, last_at) VALUES (?, ?)'
+				).bind(userPayload.id, now).run();
+				return jsonResponse({ ok: true });
 			} catch (e) {
 				return handleError(e);
 			}
