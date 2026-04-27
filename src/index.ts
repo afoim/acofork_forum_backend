@@ -547,6 +547,8 @@ export default {
 		const SITE_FOOTER_MARKDOWN_SETTING_KEY = 'site_footer_markdown';
 		const MAX_SESSION_TTL_DAYS = 365;
 		const MAX_MARKDOWN_SETTING_LENGTH = 5000;
+		const DRAW_COOLDOWN_SETTING_KEY = 'draw_cooldown_seconds';
+		const DEFAULT_DRAW_COOLDOWN_SECONDS = 0;
 		const BOOLEAN_SETTING_KEYS = new Set([
 			'turnstile_enabled',
 			'notify_on_user_delete',
@@ -568,6 +570,15 @@ export default {
 			const next = typeof value === 'string' ? value : String(value ?? '');
 			if (!next) return fallback;
 			return next.slice(0, MAX_MARKDOWN_SETTING_LENGTH);
+		};
+		const normalizeDrawCooldownSeconds = (value: unknown): number => {
+			const parsed = Number.parseInt(String(value ?? ''), 10);
+			if (!Number.isInteger(parsed) || parsed < 0) return DEFAULT_DRAW_COOLDOWN_SECONDS;
+			return parsed;
+		};
+		const getDrawCooldownSeconds = async (): Promise<number> => {
+			const setting = await env.forum_db.prepare('SELECT value FROM settings WHERE key = ?').bind(DRAW_COOLDOWN_SETTING_KEY).first();
+			return normalizeDrawCooldownSeconds(setting?.value);
 		};
 		const getSiteConfig = async (): Promise<{
 			homeIntroMarkdown: string;
@@ -720,6 +731,7 @@ export default {
 					notify_on_avatar_change: false,
 					notify_on_manual_verify: false,
 					session_ttl_days: sessionTtlDays,
+					draw_cooldown_seconds: DEFAULT_DRAW_COOLDOWN_SECONDS,
 					home_intro_markdown: DEFAULT_HOME_INTRO_MARKDOWN,
 					site_footer_markdown: DEFAULT_SITE_FOOTER_MARKDOWN
 				};
@@ -727,6 +739,10 @@ export default {
 				if (settings.results) {
 					for (const row of settings.results) {
 						if (row.key === SESSION_TTL_SETTING_KEY) continue;
+						if (row.key === DRAW_COOLDOWN_SETTING_KEY) {
+							config.draw_cooldown_seconds = normalizeDrawCooldownSeconds(row.value);
+							continue;
+						}
 						if (row.key === HOME_INTRO_MARKDOWN_SETTING_KEY) {
 							config.home_intro_markdown = normalizeMarkdownSetting(row.value, DEFAULT_HOME_INTRO_MARKDOWN);
 							continue;
@@ -762,6 +778,7 @@ export default {
 					notify_on_avatar_change,
 					notify_on_manual_verify,
 					session_ttl_days,
+					draw_cooldown_seconds,
 					home_intro_markdown,
 					site_footer_markdown
 				} = body;
@@ -781,6 +798,13 @@ export default {
 						return jsonResponse({ error: `登录态有效天数必须是 1 到 ${MAX_SESSION_TTL_DAYS} 的整数` }, 400);
 					}
 					batch.push(stmt.bind(SESSION_TTL_SETTING_KEY, String(parsedSessionTtlDays)));
+				}
+				if (draw_cooldown_seconds !== undefined) {
+					const parsed = Number.parseInt(String(draw_cooldown_seconds), 10);
+					if (!Number.isInteger(parsed) || parsed < 0 || parsed > 3600) {
+						return jsonResponse({ error: '生图冷却秒数必须是 0 到 3600 的整数' }, 400);
+					}
+					batch.push(stmt.bind(DRAW_COOLDOWN_SETTING_KEY, String(parsed)));
 				}
 				if (home_intro_markdown !== undefined) {
 					const normalizedHomeIntroMarkdown = typeof home_intro_markdown === 'string' ? home_intro_markdown : String(home_intro_markdown ?? '');
@@ -2034,7 +2058,7 @@ export default {
 				if (userPayload.role !== 'admin') return jsonResponse({ error: 'Unauthorized' }, 403);
 
 				const q = (url.searchParams.get('q') || url.searchParams.get('query') || '').trim();
-				let query = 'SELECT id, email, username, role, verified, created_at, avatar_url, last_seen_at FROM users';
+				let query = 'SELECT id, email, username, role, verified, created_at, avatar_url, last_seen_at, draw_banned FROM users';
 				const params: any[] = [];
 				const conditions: string[] = [];
 
@@ -2111,6 +2135,35 @@ export default {
 				await security.logAudit(userPayload.id, 'RESEND_VERIFY_EMAIL', 'user', id, {}, request);
 
 				return jsonResponse({ success: true, message: '验证邮件已发送' });
+			} catch (e) {
+				return handleError(e);
+			}
+		}
+
+		// POST /api/admin/users/:id/draw-ban (Toggle draw ban)
+		if (url.pathname.match(/^\/api\/admin\/users\/\d+\/draw-ban$/) && method === 'POST') {
+			const id = url.pathname.split('/')[4];
+			try {
+				const userPayload = await authenticate(request);
+				if (userPayload.role !== 'admin') return jsonResponse({ error: 'Unauthorized' }, 403);
+
+				const user = await env.forum_db.prepare('SELECT id, draw_banned FROM users WHERE id = ?').bind(id).first();
+				if (!user) return jsonResponse({ error: 'User not found' }, 404);
+
+				const newBanned = user.draw_banned ? 0 : 1;
+				await env.forum_db.prepare('UPDATE users SET draw_banned = ? WHERE id = ?').bind(newBanned, id).run();
+
+				await security.logAudit(
+					userPayload.id,
+					newBanned ? 'ADMIN_DRAW_BAN_USER' : 'ADMIN_DRAW_UNBAN_USER',
+					'user', String(id), {}, request
+				);
+
+				return jsonResponse({
+					success: true,
+					draw_banned: !!newBanned,
+					message: newBanned ? '已禁止该用户生图' : '已解除该用户生图禁令'
+				});
 			} catch (e) {
 				return handleError(e);
 			}
@@ -3329,6 +3382,8 @@ export default {
 
 		// ============== AI Draw Proxy (d.2x.nz) ==============
 		const DRAW_BACKEND = 'https://d.2x.nz';
+		const DRAW_ACCESS_CLIENT_ID = '6864bbcb13aa07d0f6f51233acdc9ad8.access';
+		const DRAW_ACCESS_CLIENT_SECRET = (env as any).AI_DRAW_ACCESS || '';
 
 		// WebSocket proxy for /api/draw/ws/*
 		if (url.pathname.startsWith('/api/draw/ws/') && request.headers.get('Upgrade') === 'websocket') {
@@ -3342,7 +3397,44 @@ export default {
 				if (!payload) return jsonResponse({ error: 'Invalid Token' }, 401);
 				userPayload = payload;
 			}
+
+			const drawUser = await env.forum_db.prepare(
+				'SELECT username, draw_banned FROM users WHERE id = ?'
+			).bind(userPayload.id).first();
+			const creatorName = (drawUser?.username as string) || userPayload.email || 'unknown';
+
+			if (drawUser && drawUser.draw_banned) {
+				const [client, server] = Object.values(new WebSocketPair());
+				server.accept();
+				server.send(JSON.stringify({ type: 'error', message: '你已被禁止使用生图功能', banned: true }));
+				server.close(1008, 'draw banned');
+				return new Response(null, { status: 101, webSocket: client });
+			}
+
 			const backendPath = url.pathname.replace('/api/draw/ws/', '/ws/');
+
+			if (backendPath === '/ws/run' && userPayload.role !== 'admin') {
+				const cooldownSeconds = await getDrawCooldownSeconds();
+				if (cooldownSeconds > 0) {
+					const now = Math.floor(Date.now() / 1000);
+					const row = await env.forum_db.prepare(
+						'SELECT last_at FROM draw_rate_limits WHERE user_id = ?'
+					).bind(userPayload.id).first();
+					const lastAt = row ? Number(row.last_at) : 0;
+					const remaining = cooldownSeconds - (now - lastAt);
+					if (remaining > 0) {
+						const [client, server] = Object.values(new WebSocketPair());
+						server.accept();
+						server.send(JSON.stringify({ type: 'error', message: `生图冷却中，请等待 ${remaining} 秒后再试`, cooldown: true, remaining }));
+						server.close(1008, 'rate limited');
+						return new Response(null, { status: 101, webSocket: client });
+					}
+					await env.forum_db.prepare(
+						'INSERT OR REPLACE INTO draw_rate_limits (user_id, last_at) VALUES (?, ?)'
+					).bind(userPayload.id, now).run();
+				}
+			}
+
 			const cleanParams = new URLSearchParams(url.search);
 			cleanParams.delete('token');
 			const qs = cleanParams.toString();
@@ -3351,14 +3443,29 @@ export default {
 			const [client, server] = Object.values(new WebSocketPair());
 			server.accept();
 
-			const upstream = new WebSocket(backendUrl);
+			let upstream: WebSocket;
+			try {
+				upstream = new WebSocket(backendUrl, {
+					headers: {
+						'CF-Access-Client-Id': DRAW_ACCESS_CLIENT_ID,
+						'CF-Access-Client-Secret': DRAW_ACCESS_CLIENT_SECRET,
+						'X-Creator-Name': creatorName,
+					},
+				} as any);
+			} catch (e) {
+				server.send(JSON.stringify({ type: 'error', message: 'Failed to connect upstream: ' + String(e) }));
+				server.close(1011, 'upstream connect failed: ' + String(e));
+				return new Response(null, { status: 101, webSocket: client });
+			}
 			upstream.addEventListener('message', (e) => {
 				try { server.send(typeof e.data === 'string' ? e.data : e.data); } catch {}
 			});
 			upstream.addEventListener('close', (e) => {
+				server.send(JSON.stringify({ type: 'error', message: `Upstream closed: code=${e.code} reason=${e.reason}` }));
 				try { server.close(e.code, e.reason); } catch {}
 			});
-			upstream.addEventListener('error', () => {
+			upstream.addEventListener('error', (e) => {
+				server.send(JSON.stringify({ type: 'error', message: 'Upstream WS error: ' + String(e) }));
 				try { server.close(1011, 'upstream error'); } catch {}
 			});
 			server.addEventListener('message', (e) => {
@@ -3371,22 +3478,100 @@ export default {
 			return new Response(null, { status: 101, webSocket: client });
 		}
 
-		// HTTP proxy for /api/draw/*
-		if (url.pathname.startsWith('/api/draw/')) {
+		// Diagnostic endpoint for AI Draw proxy
+		if (url.pathname === '/api/draw/debug' && method === 'GET') {
 			try {
 				await authenticate(request);
 			} catch {
 				return jsonResponse({ error: 'Unauthorized' }, 401);
 			}
+			const testUrl = `${DRAW_BACKEND}/api/workflows`;
+			const hasSecret = !!DRAW_ACCESS_CLIENT_SECRET;
+			const secretLen = DRAW_ACCESS_CLIENT_SECRET.length;
+			const secretPrefix = DRAW_ACCESS_CLIENT_SECRET.slice(0, 4);
+			const diag: Record<string, unknown> = {
+				draw_backend: DRAW_BACKEND,
+				test_url: testUrl,
+				client_id: DRAW_ACCESS_CLIENT_ID,
+				secret_configured: hasSecret,
+				secret_length: secretLen,
+				secret_prefix: secretPrefix + '...',
+			};
+			try {
+				const resp = await fetch(testUrl, {
+					headers: {
+						'CF-Access-Client-Id': DRAW_ACCESS_CLIENT_ID,
+						'CF-Access-Client-Secret': DRAW_ACCESS_CLIENT_SECRET,
+					},
+				});
+				const body = await resp.text();
+				diag.upstream_status = resp.status;
+				diag.upstream_status_text = resp.statusText;
+				diag.upstream_content_type = resp.headers.get('content-type');
+				diag.upstream_cf_ray = resp.headers.get('cf-ray');
+				diag.upstream_server = resp.headers.get('server');
+				diag.upstream_body_preview = body.slice(0, 500);
+				const respHeaders: Record<string, string> = {};
+				resp.headers.forEach((v, k) => { respHeaders[k] = v; });
+				diag.upstream_headers = respHeaders;
+			} catch (e) {
+				diag.upstream_error = String(e);
+			}
+
+			// Also test WebSocket reachability via HTTP
+			const wsTestUrl = `${DRAW_BACKEND}/ws/status`;
+			try {
+				const resp2 = await fetch(wsTestUrl, {
+					headers: {
+						'CF-Access-Client-Id': DRAW_ACCESS_CLIENT_ID,
+						'CF-Access-Client-Secret': DRAW_ACCESS_CLIENT_SECRET,
+					},
+				});
+				diag.ws_http_status = resp2.status;
+				diag.ws_http_body_preview = (await resp2.text()).slice(0, 200);
+			} catch (e) {
+				diag.ws_http_error = String(e);
+			}
+
+			return jsonResponse(diag);
+		}
+
+		// HTTP proxy for /api/draw/*
+		if (url.pathname.startsWith('/api/draw/')) {
+			let httpUserPayload: UserPayload;
+			try {
+				httpUserPayload = await authenticate(request);
+			} catch {
+				const qToken = url.searchParams.get('token');
+				if (!qToken) return jsonResponse({ error: 'Unauthorized' }, 401);
+				const payload = await security.verifyToken(qToken);
+				if (!payload) return jsonResponse({ error: 'Invalid Token' }, 401);
+				httpUserPayload = payload;
+			}
+
+			const httpDrawUser = await env.forum_db.prepare(
+				'SELECT username, draw_banned FROM users WHERE id = ?'
+			).bind(httpUserPayload.id).first();
+			if (httpDrawUser && httpDrawUser.draw_banned) {
+				return jsonResponse({ error: '你已被禁止使用生图功能' }, 403);
+			}
+			const httpCreatorName = (httpDrawUser?.username as string) || httpUserPayload.email || 'unknown';
+
+			const cleanParams = new URLSearchParams(url.search);
+			cleanParams.delete('token');
+			const qs = cleanParams.toString();
 			const backendPath = url.pathname.replace('/api/draw', '');
-			const backendUrl = `${DRAW_BACKEND}${backendPath}${url.search}`;
+			const backendUrl = `${DRAW_BACKEND}${backendPath}${qs ? '?' + qs : ''}`;
 
 			const proxyHeaders = new Headers();
-			for (const [k, v] of request.headers.entries()) {
-				if (['host', 'authorization', 'x-timestamp', 'x-nonce'].includes(k.toLowerCase())) continue;
-				proxyHeaders.set(k, v);
-			}
+			const contentType = request.headers.get('Content-Type');
+			if (contentType) proxyHeaders.set('Content-Type', contentType);
+			const accept = request.headers.get('Accept');
+			if (accept) proxyHeaders.set('Accept', accept);
 			proxyHeaders.set('X-Forwarded-For', request.headers.get('CF-Connecting-IP') || '');
+			proxyHeaders.set('CF-Access-Client-Id', DRAW_ACCESS_CLIENT_ID);
+			proxyHeaders.set('CF-Access-Client-Secret', DRAW_ACCESS_CLIENT_SECRET);
+			proxyHeaders.set('X-Creator-Name', httpCreatorName);
 
 			const proxyInit: RequestInit = {
 				method: request.method,
@@ -3407,7 +3592,7 @@ export default {
 					headers: respHeaders,
 				});
 			} catch (e) {
-				return jsonResponse({ error: 'Draw backend unreachable' }, 502);
+				return jsonResponse({ error: 'Draw backend unreachable', detail: String(e) }, 502);
 			}
 		}
 

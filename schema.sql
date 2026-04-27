@@ -27,7 +27,8 @@ CREATE TABLE users (
   email_notifications INTEGER DEFAULT 1,
   article_notifications INTEGER DEFAULT 0,
   last_seen_at TIMESTAMP,
-  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  draw_banned INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE user_profiles (
@@ -120,6 +121,11 @@ CREATE TABLE audit_logs (
   details TEXT,
   ip_address TEXT,
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE draw_rate_limits (
+  user_id INTEGER PRIMARY KEY,
+  last_at INTEGER NOT NULL DEFAULT 0
 );
 
 INSERT INTO settings (key, value) VALUES ('turnstile_enabled', '0');
