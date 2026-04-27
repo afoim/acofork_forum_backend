@@ -3422,8 +3422,18 @@ export default {
 				}
 
 				const wsUrl = new URL(`${DRAW_BACKEND.replace('https:', 'wss:').replace('http:', 'ws:')}/ws/${endpoint}`);
-				if (DRAW_API_SECRET) wsUrl.searchParams.set('secret', DRAW_API_SECRET);
 				wsUrl.searchParams.set('creator_name', creatorName);
+				if (DRAW_API_SECRET) {
+					const exp = Math.floor(Date.now() / 1000) + 300;
+					const payload = `${creatorName}:${exp}`;
+					const key = await crypto.subtle.importKey(
+						'raw', new TextEncoder().encode(DRAW_API_SECRET),
+						{ name: 'HMAC', hash: 'SHA-256' }, false, ['sign']
+					);
+					const sig = await crypto.subtle.sign('HMAC', key, new TextEncoder().encode(payload));
+					const hex = [...new Uint8Array(sig)].map(b => b.toString(16).padStart(2, '0')).join('');
+					wsUrl.searchParams.set('ticket', `${payload}:${hex}`);
+				}
 
 				return jsonResponse({ url: wsUrl.toString() });
 			} catch (e) {
@@ -3525,7 +3535,17 @@ export default {
 			proxyHeaders.set('CF-Access-Client-Id', DRAW_ACCESS_CLIENT_ID);
 			proxyHeaders.set('CF-Access-Client-Secret', DRAW_ACCESS_CLIENT_SECRET);
 			proxyHeaders.set('X-Creator-Name', httpCreatorName);
-			if (DRAW_API_SECRET) proxyHeaders.set('X-Draw-Secret', DRAW_API_SECRET);
+			if (DRAW_API_SECRET) {
+				const exp = Math.floor(Date.now() / 1000) + 300;
+				const payload = `${httpCreatorName}:${exp}`;
+				const key = await crypto.subtle.importKey(
+					'raw', new TextEncoder().encode(DRAW_API_SECRET),
+					{ name: 'HMAC', hash: 'SHA-256' }, false, ['sign']
+				);
+				const sig = await crypto.subtle.sign('HMAC', key, new TextEncoder().encode(payload));
+				const hex = [...new Uint8Array(sig)].map(b => b.toString(16).padStart(2, '0')).join('');
+				proxyHeaders.set('X-Draw-Ticket', `${payload}:${hex}`);
+			}
 
 			const proxyInit: RequestInit = {
 				method: request.method,
