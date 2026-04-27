@@ -6,6 +6,7 @@ import * as OTPAuth from 'otpauth';
 import { Security, UserPayload } from './security';
 import { SignJWT, jwtVerify } from 'jose';
 export { SSEHub, handleSSEConnection } from './sse-hub';
+export { DrawWsProxy } from './draw-ws-proxy';
 
 // Utility to extract image URLs from Markdown content
 function extractImageUrls(content: string): string[] {
@@ -3385,7 +3386,7 @@ export default {
 		const DRAW_ACCESS_CLIENT_ID = '6864bbcb13aa07d0f6f51233acdc9ad8.access';
 		const DRAW_ACCESS_CLIENT_SECRET = (env as any).AI_DRAW_ACCESS || '';
 
-		// WebSocket proxy for /api/draw/ws/*
+		// WebSocket proxy for /api/draw/ws/* via Durable Object
 		if (url.pathname.startsWith('/api/draw/ws/') && request.headers.get('Upgrade') === 'websocket') {
 			let userPayload: UserPayload;
 			try {
@@ -3438,51 +3439,19 @@ export default {
 			const cleanParams = new URLSearchParams(url.search);
 			cleanParams.delete('token');
 			const qs = cleanParams.toString();
-			const backendUrl = `${DRAW_BACKEND.replace('https:', 'wss:')}${backendPath}${qs ? '?' + qs : ''}`;
+			const backendWsUrl = `${DRAW_BACKEND.replace('https:', 'wss:').replace('http:', 'ws:')}${backendPath}${qs ? '?' + qs : ''}`;
 
-			const [client, server] = Object.values(new WebSocketPair());
-			server.accept();
+			const doId = (env as any).DRAW_WS_PROXY.newUniqueId();
+			const stub = (env as any).DRAW_WS_PROXY.get(doId);
+			const doUrl = new URL('https://do/websocket');
+			doUrl.searchParams.set('backendUrl', backendWsUrl);
+			doUrl.searchParams.set('accessClientId', DRAW_ACCESS_CLIENT_ID);
+			doUrl.searchParams.set('accessClientSecret', DRAW_ACCESS_CLIENT_SECRET);
+			doUrl.searchParams.set('creatorName', creatorName);
 
-			let upstreamWs: WebSocket;
-			try {
-				const upstreamResp = await fetch(backendUrl.replace('wss:', 'https:').replace('ws:', 'http:'), {
-					headers: {
-						'Upgrade': 'websocket',
-						'CF-Access-Client-Id': DRAW_ACCESS_CLIENT_ID,
-						'CF-Access-Client-Secret': DRAW_ACCESS_CLIENT_SECRET,
-						'X-Creator-Name': creatorName,
-					},
-				});
-				upstreamWs = (upstreamResp as any).webSocket;
-				if (!upstreamWs) {
-					const body = await upstreamResp.text();
-					throw new Error(`Upstream returned ${upstreamResp.status}: ${body.slice(0, 200)}`);
-				}
-				upstreamWs.accept();
-			} catch (e) {
-				server.send(JSON.stringify({ type: 'error', message: 'Failed to connect upstream: ' + String(e) }));
-				server.close(1011, 'upstream connect failed: ' + String(e));
-				return new Response(null, { status: 101, webSocket: client });
-			}
-			upstreamWs.addEventListener('message', (e) => {
-				try { server.send(typeof e.data === 'string' ? e.data : e.data); } catch {}
+			return stub.fetch(doUrl.toString(), {
+				headers: { Upgrade: 'websocket' },
 			});
-			upstreamWs.addEventListener('close', (e) => {
-				server.send(JSON.stringify({ type: 'error', message: `Upstream closed: code=${e.code} reason=${e.reason}` }));
-				try { server.close(e.code, e.reason); } catch {}
-			});
-			upstreamWs.addEventListener('error', (e) => {
-				server.send(JSON.stringify({ type: 'error', message: 'Upstream WS error: ' + String(e) }));
-				try { server.close(1011, 'upstream error'); } catch {}
-			});
-			server.addEventListener('message', (e) => {
-				try { upstreamWs.send(typeof e.data === 'string' ? e.data : e.data); } catch {}
-			});
-			server.addEventListener('close', (e) => {
-				try { upstreamWs.close(e.code, e.reason); } catch {}
-			});
-
-			return new Response(null, { status: 101, webSocket: client });
 		}
 
 		// Diagnostic endpoint for AI Draw proxy
