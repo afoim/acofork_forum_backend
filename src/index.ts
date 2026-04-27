@@ -450,19 +450,23 @@ function buildEmailTemplate(templateKey: string, origin: string, payload: EmailT
 }
 
 async function verifyTurnstile(token: string, ip: string, secretKey: string): Promise<boolean> {
-	const formData = new FormData();
-	formData.append('secret', secretKey);
-	formData.append('response', token);
-	formData.append('remoteip', ip);
+	try {
+		const formData = new FormData();
+		formData.append('secret', secretKey);
+		formData.append('response', token);
+		formData.append('remoteip', ip);
 
-	const url = 'https://challenges.cloudflare.com/turnstile/v0/siteverify';
-	const result = await fetch(url, {
-		body: formData,
-		method: 'POST',
-	});
+		const url = 'https://challenges.cloudflare.com/turnstile/v0/siteverify';
+		const result = await fetch(url, {
+			body: formData,
+			method: 'POST',
+		});
 
-	const outcome = await result.json() as any;
-	return outcome.success;
+		const outcome = await result.json() as any;
+		return outcome.success === true;
+	} catch {
+		return false;
+	}
 }
 
 export default {
@@ -726,14 +730,14 @@ export default {
 						if (row.key === HOME_INTRO_MARKDOWN_SETTING_KEY) {
 							config.home_intro_markdown = normalizeMarkdownSetting(row.value, DEFAULT_HOME_INTRO_MARKDOWN);
 							continue;
-						}
+ 					}
 						if (row.key === SITE_FOOTER_MARKDOWN_SETTING_KEY) {
 							config.site_footer_markdown = normalizeMarkdownSetting(row.value, DEFAULT_SITE_FOOTER_MARKDOWN);
 							continue;
-						}
+ 					}
 						if (BOOLEAN_SETTING_KEYS.has(row.key)) {
 							config[row.key] = row.value === '1';
-						}
+ 					}
 					}
 				}
 
@@ -927,7 +931,7 @@ export default {
 			if (setting && setting.value === '1') {
 				if (!env.TURNSTILE_SECRET_KEY) return false;
 				const token = reqBody['cf-turnstile-response'];
-				if (!token) return false;
+				if (typeof token !== 'string' || !token) return false;
 				return await verifyTurnstile(token, ip, env.TURNSTILE_SECRET_KEY);
 			}
 			return true;
@@ -1722,15 +1726,9 @@ export default {
 
 				// Turnstile Check
 				const ip = request.headers.get('CF-Connecting-IP') || '127.0.0.1';
-				const turnstileEnabled = await env.forum_db.prepare("SELECT value FROM settings WHERE key = 'turnstile_enabled'").first();
-				
-				if (turnstileEnabled && turnstileEnabled.value === '1') {
-					if (!env.TURNSTILE_SECRET_KEY) return jsonResponse({ error: 'Turnstile not configured' }, 500);
-					const token = body['cf-turnstile-response'];
-					if (!token) return jsonResponse({ error: 'Turnstile verification failed (No Token)' }, 403);
-					const valid = await verifyTurnstile(token, ip, env.TURNSTILE_SECRET_KEY);
-					if (!valid) return jsonResponse({ error: 'Turnstile verification failed (Invalid Token)' }, 403);
-				}
+					if (!(await checkTurnstile(body, ip))) {
+						return jsonResponse({ error: 'Turnstile verification failed' }, 403);
+					}
 
 				const { email } = body;
 				if (!email) return jsonResponse({ error: 'Missing email' }, 400);
@@ -2215,7 +2213,7 @@ export default {
 							username: post.username,
 							postTitle: post.title,
 							postUrl
-						}).catch(console.error));
+ 					}).catch(console.error));
 					}
 				}
 
@@ -2412,7 +2410,7 @@ export default {
 							label: templateDefinition.label,
 							success: false,
 							error: String(error?.message || error)
-						});
+ 					});
 					}
 				}
 
@@ -2862,7 +2860,7 @@ export default {
 								category_id: category_id || null,
 								updated_at: new Date().toISOString()
 							}
-						}
+ 					}
 					})
 				})).catch(console.error));
 
@@ -3007,10 +3005,10 @@ export default {
 							content = `@${targetName} ${content}`;
 							parent_id = parent.parent_id; // Move up to share the same Level 1 parent
 							originalParentAuthorId = parent.author_id; // We still want to notify the specific user we @mentioned
-						} else {
+ 					} else {
 							// Normal Level 2 reply
 							originalParentAuthorId = parent.author_id;
-						}
+ 					}
 					}
 				}
 
@@ -3041,7 +3039,7 @@ export default {
 							postTitle: post.title,
 							commentContent: rewriteMarkdownImageRefsToPublicUrl(storedContent, env as unknown as S3Env),
 							postUrl
-						}).catch(console.error));
+ 					}).catch(console.error));
 					}
 
 					// 2. Notify Parent Comment Author (if replying to a comment)
@@ -3070,7 +3068,7 @@ export default {
 									}).catch(console.error));
 								}
 							}
-						}
+ 					}
 					}
 
 					// WebSocket broadcast for real-time updates via Durable Object
@@ -3093,7 +3091,7 @@ export default {
 									}
 								}
 							}
-						})
+ 					})
 					})).catch(console.error));
 				}
 
@@ -3326,6 +3324,90 @@ export default {
 				return jsonResponse({ count: result?.count || 0 });
 			} catch (e) {
 				return handleError(e);
+			}
+		}
+
+		// ============== AI Draw Proxy (d.2x.nz) ==============
+		const DRAW_BACKEND = 'https://d.2x.nz';
+
+		// WebSocket proxy for /api/draw/ws/*
+		if (url.pathname.startsWith('/api/draw/ws/') && request.headers.get('Upgrade') === 'websocket') {
+			let userPayload: UserPayload;
+			try {
+				userPayload = await authenticate(request);
+			} catch {
+				const wsToken = url.searchParams.get('token');
+				if (!wsToken) return jsonResponse({ error: 'Unauthorized' }, 401);
+				const payload = await security.verifyToken(wsToken);
+				if (!payload) return jsonResponse({ error: 'Invalid Token' }, 401);
+				userPayload = payload;
+			}
+			const backendPath = url.pathname.replace('/api/draw/ws/', '/ws/');
+			const cleanParams = new URLSearchParams(url.search);
+			cleanParams.delete('token');
+			const qs = cleanParams.toString();
+			const backendUrl = `${DRAW_BACKEND.replace('https:', 'wss:')}${backendPath}${qs ? '?' + qs : ''}`;
+
+			const [client, server] = Object.values(new WebSocketPair());
+			server.accept();
+
+			const upstream = new WebSocket(backendUrl);
+			upstream.addEventListener('message', (e) => {
+				try { server.send(typeof e.data === 'string' ? e.data : e.data); } catch {}
+			});
+			upstream.addEventListener('close', (e) => {
+				try { server.close(e.code, e.reason); } catch {}
+			});
+			upstream.addEventListener('error', () => {
+				try { server.close(1011, 'upstream error'); } catch {}
+			});
+			server.addEventListener('message', (e) => {
+				try { upstream.send(typeof e.data === 'string' ? e.data : e.data); } catch {}
+			});
+			server.addEventListener('close', (e) => {
+				try { upstream.close(e.code, e.reason); } catch {}
+			});
+
+			return new Response(null, { status: 101, webSocket: client });
+		}
+
+		// HTTP proxy for /api/draw/*
+		if (url.pathname.startsWith('/api/draw/')) {
+			try {
+				await authenticate(request);
+			} catch {
+				return jsonResponse({ error: 'Unauthorized' }, 401);
+			}
+			const backendPath = url.pathname.replace('/api/draw', '');
+			const backendUrl = `${DRAW_BACKEND}${backendPath}${url.search}`;
+
+			const proxyHeaders = new Headers();
+			for (const [k, v] of request.headers.entries()) {
+				if (['host', 'authorization', 'x-timestamp', 'x-nonce'].includes(k.toLowerCase())) continue;
+				proxyHeaders.set(k, v);
+			}
+			proxyHeaders.set('X-Forwarded-For', request.headers.get('CF-Connecting-IP') || '');
+
+			const proxyInit: RequestInit = {
+				method: request.method,
+				headers: proxyHeaders,
+			};
+			if (['POST', 'PUT', 'PATCH'].includes(method)) {
+				proxyInit.body = request.body;
+			}
+
+			try {
+				const upstream = await fetch(backendUrl, proxyInit);
+				const respHeaders = new Headers(upstream.headers);
+				for (const [k, v] of Object.entries(corsHeaders)) {
+					respHeaders.set(k, v);
+				}
+				return new Response(upstream.body, {
+					status: upstream.status,
+					headers: respHeaders,
+				});
+			} catch (e) {
+				return jsonResponse({ error: 'Draw backend unreachable' }, 502);
 			}
 		}
 
