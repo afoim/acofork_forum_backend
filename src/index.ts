@@ -3443,36 +3443,43 @@ export default {
 			const [client, server] = Object.values(new WebSocketPair());
 			server.accept();
 
-			let upstream: WebSocket;
+			let upstreamWs: WebSocket;
 			try {
-				upstream = new WebSocket(backendUrl, {
+				const upstreamResp = await fetch(backendUrl.replace('wss:', 'https:').replace('ws:', 'http:'), {
 					headers: {
+						'Upgrade': 'websocket',
 						'CF-Access-Client-Id': DRAW_ACCESS_CLIENT_ID,
 						'CF-Access-Client-Secret': DRAW_ACCESS_CLIENT_SECRET,
 						'X-Creator-Name': creatorName,
 					},
-				} as any);
+				});
+				upstreamWs = (upstreamResp as any).webSocket;
+				if (!upstreamWs) {
+					const body = await upstreamResp.text();
+					throw new Error(`Upstream returned ${upstreamResp.status}: ${body.slice(0, 200)}`);
+				}
+				upstreamWs.accept();
 			} catch (e) {
 				server.send(JSON.stringify({ type: 'error', message: 'Failed to connect upstream: ' + String(e) }));
 				server.close(1011, 'upstream connect failed: ' + String(e));
 				return new Response(null, { status: 101, webSocket: client });
 			}
-			upstream.addEventListener('message', (e) => {
+			upstreamWs.addEventListener('message', (e) => {
 				try { server.send(typeof e.data === 'string' ? e.data : e.data); } catch {}
 			});
-			upstream.addEventListener('close', (e) => {
+			upstreamWs.addEventListener('close', (e) => {
 				server.send(JSON.stringify({ type: 'error', message: `Upstream closed: code=${e.code} reason=${e.reason}` }));
 				try { server.close(e.code, e.reason); } catch {}
 			});
-			upstream.addEventListener('error', (e) => {
+			upstreamWs.addEventListener('error', (e) => {
 				server.send(JSON.stringify({ type: 'error', message: 'Upstream WS error: ' + String(e) }));
 				try { server.close(1011, 'upstream error'); } catch {}
 			});
 			server.addEventListener('message', (e) => {
-				try { upstream.send(typeof e.data === 'string' ? e.data : e.data); } catch {}
+				try { upstreamWs.send(typeof e.data === 'string' ? e.data : e.data); } catch {}
 			});
 			server.addEventListener('close', (e) => {
-				try { upstream.close(e.code, e.reason); } catch {}
+				try { upstreamWs.close(e.code, e.reason); } catch {}
 			});
 
 			return new Response(null, { status: 101, webSocket: client });
